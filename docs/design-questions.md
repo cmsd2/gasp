@@ -36,10 +36,18 @@ Tradeoffs:
   project — fine for monoliths-pretending-to-be-polyrepos, awkward otherwise.
 
 **Decided:** `.workspace/` marker directory at the workspace root.
-`workspace.toml` starts as a loose file inside `.workspace/`, and
-"graduates" to being a checked-out manifest repo inside `.workspace/manifest/`
-later without breaking the layout. Cloned repos sit as siblings of
-`.workspace/` under the workspace root.
+`workspace.toml` can live either as a loose file at
+`.workspace/workspace.toml` (when initialized from a local file) or
+inside a cloned git repo at `.workspace/manifest/workspace.toml` (when
+initialized from a URL). Cloned repos sit as siblings of `.workspace/`
+under the workspace root.
+
+**Both modes are first-class** as of the M6+remote-manifest work:
+`gasp init` dispatches based on the argument shape — existing file →
+loose mode; existing directory, `://` URL, SCP-style SSH, or
+`owner/repo` shorthand → cloned mode. `Workspace::manifest_mode()`
+returns `Loose` or `Cloned` based on whether `.workspace/manifest/.git`
+exists.
 
 ### Nested workspaces and imports
 

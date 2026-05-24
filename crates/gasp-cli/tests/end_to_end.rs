@@ -140,6 +140,118 @@ fn new_writes_to_explicit_path() {
     assert!(dest.is_file());
 }
 
+/// Build a bare git repo at `<root>/<name>.git` containing a single
+/// `workspace.toml` file with the given contents. Returns the bare repo
+/// path, suitable for use as a clone URL.
+fn make_bare_manifest_repo(root: &Path, name: &str, manifest_text: &str) -> PathBuf {
+    let src = root.join(format!("{name}-src"));
+    std::fs::create_dir_all(&src).unwrap();
+    run(&src, "git", &["init", "-q", "-b", "main", "."]);
+    std::fs::write(src.join("workspace.toml"), manifest_text).unwrap();
+    run(&src, "git", &["add", "-A"]);
+    run(
+        &src,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "manifest",
+        ],
+    );
+    let bare = root.join(format!("{name}.git"));
+    run(
+        root,
+        "git",
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            src.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    bare
+}
+
+#[test]
+fn init_from_remote_url_clones_manifest_repo() {
+    let f = Fixture::new();
+    let code = f.make_bare_repo("alpha");
+    let manifest_bare = make_bare_manifest_repo(
+        f._root.path(),
+        "manifest",
+        &format!(
+            r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+            code.display(),
+        ),
+    );
+
+    // Init by URL (local bare repo path acts as the URL).
+    let out = f.gasp(&["init", manifest_bare.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The manifest lives inside the cloned repo, not as a loose file.
+    assert!(
+        f.workspace
+            .join(".workspace")
+            .join("manifest")
+            .join(".git")
+            .exists()
+    );
+    assert!(
+        f.workspace
+            .join(".workspace")
+            .join("manifest")
+            .join("workspace.toml")
+            .is_file()
+    );
+    assert!(
+        !f.workspace
+            .join(".workspace")
+            .join("workspace.toml")
+            .exists()
+    );
+
+    // Downstream commands still work.
+    let out = f.gasp(&["list"]);
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("alpha"));
+
+    let out = f.gasp(&["sync"]);
+    assert!(out.status.success());
+    assert!(
+        f.workspace.join("alpha").join("README.md").exists()
+            || f.workspace.join("alpha").join("workspace.toml").exists()
+            || f.workspace.join("alpha").exists()
+    );
+}
+
+#[test]
+fn init_rolls_back_when_remote_manifest_is_invalid() {
+    let f = Fixture::new();
+    let bad_bare = make_bare_manifest_repo(f._root.path(), "bad", "version = 99\n");
+
+    let out = f.gasp(&["init", bad_bare.to_str().unwrap()]);
+    assert!(!out.status.success());
+    // .workspace/ must be cleaned up entirely
+    assert!(!f.workspace.join(".workspace").exists());
+}
+
 #[test]
 fn init_creates_dot_workspace_with_manifest_copy() {
     let f = Fixture::new();

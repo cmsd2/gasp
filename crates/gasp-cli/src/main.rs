@@ -52,10 +52,16 @@ enum Command {
         path: Option<PathBuf>,
     },
 
-    /// Initialize a workspace from a manifest file.
+    /// Initialize a workspace from a manifest source.
+    ///
+    /// The source can be:
+    /// * a path to a local workspace.toml,
+    /// * a git URL (https://..., ssh://..., git@host:path) to a
+    ///   manifest repository, or
+    /// * an `owner/repo` GitHub shorthand for a manifest repository.
     Init {
-        /// Path to the workspace.toml manifest to use.
-        manifest: PathBuf,
+        /// Manifest source: local file path, git URL, or owner/repo shorthand.
+        source: String,
     },
 
     /// Clone missing repos and update existing ones to match the manifest.
@@ -142,7 +148,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::New { path } => cmd_new(path.as_deref()).map(|()| ExitCode::SUCCESS),
-        Command::Init { manifest } => cmd_init(&manifest).map(|()| ExitCode::SUCCESS),
+        Command::Init { source } => cmd_init(&source).map(|()| ExitCode::SUCCESS),
         Command::List => cmd_list().map(|()| ExitCode::SUCCESS),
         Command::Sync {
             on_conflict,
@@ -211,11 +217,56 @@ fn cmd_new(path: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(manifest: &std::path::Path) -> Result<()> {
+fn cmd_init(source: &str) -> Result<()> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let ws = Workspace::init(&cwd, manifest)?;
+    let ws = match classify_init_source(source) {
+        InitSource::Path(p) => Workspace::init(&cwd, &p)?,
+        InitSource::Url(u) => {
+            println!("Cloning manifest repository {u}...");
+            Workspace::init_from_url(&cwd, &u)?
+        }
+    };
     println!("Initialized workspace at {}", ws.root().display());
     Ok(())
+}
+
+enum InitSource {
+    Path(PathBuf),
+    Url(String),
+}
+
+/// Decide whether `source` is a local file path, a clone URL, or an
+/// `owner/repo` shorthand. Tried in order: existing file → loose-file
+/// init; existing directory → clone (local bare repos are directories);
+/// URL with scheme → clone; SCP-style SSH → clone; `owner/repo` shape →
+/// clone (shorthand → GitHub URL); otherwise loose-file init
+/// (`Workspace::init` will report the missing file).
+fn classify_init_source(source: &str) -> InitSource {
+    let trimmed = source.trim();
+    let path = std::path::Path::new(trimmed);
+
+    if path.is_file() {
+        return InitSource::Path(PathBuf::from(trimmed));
+    }
+    if path.is_dir() {
+        return InitSource::Url(trimmed.to_string());
+    }
+    if trimmed.contains("://") || is_scp_style(trimmed) {
+        return InitSource::Url(trimmed.to_string());
+    }
+    if let Ok(url) = gasp_core::url::normalize(trimmed, "github.com", "manifest")
+        && url != trimmed
+    {
+        return InitSource::Url(url);
+    }
+    InitSource::Path(PathBuf::from(trimmed))
+}
+
+fn is_scp_style(s: &str) -> bool {
+    // user@host:path — has an '@' followed later by a ':'.
+    s.find('@')
+        .and_then(|at| s.get(at + 1..))
+        .is_some_and(|rest| rest.contains(':'))
 }
 
 fn cmd_list() -> Result<()> {
