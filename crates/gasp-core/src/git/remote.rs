@@ -36,6 +36,64 @@ pub fn clone(url: &str, dest: &Path, revision: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `git -C <repo> fetch <remote>`.
+pub fn fetch(repo: &Path, remote: &str) -> Result<()> {
+    run_git(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("fetch")
+            .arg("--prune")
+            .arg(remote),
+        "fetch",
+        remote,
+    )
+}
+
+/// `git -C <repo> merge --ff-only <target>`. Fails if the merge would not
+/// be a fast-forward.
+pub fn merge_ff_only(repo: &Path, target: &str) -> Result<()> {
+    run_git(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("merge")
+            .arg("--ff-only")
+            .arg(target),
+        "merge --ff-only",
+        target,
+    )
+}
+
+/// `git -C <repo> rebase <onto>`. Falls back to leaving the rebase in
+/// progress on conflict — git's own error message is surfaced.
+pub fn rebase(repo: &Path, onto: &str) -> Result<()> {
+    run_git(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("rebase")
+            .arg(onto),
+        "rebase",
+        onto,
+    )
+}
+
+/// `git -C <repo> reset --hard <target>`. Destroys local commits and
+/// working-tree changes.
+pub fn reset_hard(repo: &Path, target: &str) -> Result<()> {
+    run_git(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("reset")
+            .arg("--hard")
+            .arg(target),
+        "reset --hard",
+        target,
+    )
+}
+
 fn run_git(cmd: &mut Command, operation: &str, target: &str) -> Result<()> {
     let output = cmd.output().map_err(|source| Error::GitSpawn { source })?;
     if !output.status.success() {

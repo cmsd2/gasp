@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use gasp_core::status::{HeadCompare, RepoState, TargetState};
-use gasp_core::{Workspace, git, status};
+use gasp_core::sync::{Action, ConflictMode};
+use gasp_core::{Workspace, status, sync};
 
 #[derive(Parser)]
 #[command(name = "gasp", version, about = "Multi-repo workspace manager")]
@@ -103,7 +104,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::New { path } => cmd_new(path.as_deref()).map(|()| ExitCode::SUCCESS),
         Command::Init { manifest } => cmd_init(&manifest).map(|()| ExitCode::SUCCESS),
         Command::List => cmd_list().map(|()| ExitCode::SUCCESS),
-        Command::Sync { groups, .. } => cmd_sync(&groups),
+        Command::Sync {
+            refuse: _,
+            rebase,
+            reset,
+            groups,
+        } => {
+            let mode = if reset {
+                ConflictMode::Reset
+            } else if rebase {
+                ConflictMode::Rebase
+            } else {
+                ConflictMode::Refuse
+            };
+            cmd_sync(&groups, mode)
+        }
         Command::Status => cmd_status(),
         Command::Foreach { .. } => not_implemented("foreach").map(|()| ExitCode::SUCCESS),
         Command::Freeze { .. } => not_implemented("freeze").map(|()| ExitCode::SUCCESS),
@@ -368,7 +383,7 @@ fn short_sha(s: &str) -> String {
     s.chars().take(7).collect()
 }
 
-fn cmd_sync(group_filter: &[String]) -> Result<ExitCode> {
+fn cmd_sync(group_filter: &[String], mode: ConflictMode) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
     let manifest = ws.load_manifest()?;
@@ -383,25 +398,39 @@ fn cmd_sync(group_filter: &[String]) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let mut cloned = 0usize;
-    let mut skipped = 0usize;
+    let mut counts = SyncCounts::default();
     let mut failed: Vec<(String, gasp_core::Error)> = Vec::new();
 
     for repo in &repos {
         let dest = ws.repo_path(&repo.path);
-        if dest.exists() {
-            println!("  skip   {} (already present)", repo.name);
-            skipped += 1;
+
+        // Fetch first for existing repos so planning sees up-to-date refs.
+        if dest.exists()
+            && let Err(err) = sync::fetch_remote(&dest, &repo.remote)
+        {
+            println!("  fetch  {} ... FAILED", repo.name);
+            failed.push((repo.name.clone(), err));
             continue;
         }
 
-        print!("  clone  {} ... ", repo.name);
+        let status = match status::inspect(&ws, repo) {
+            Ok(s) => s,
+            Err(err) => {
+                println!("  status {} ... FAILED", repo.name);
+                failed.push((repo.name.clone(), err));
+                continue;
+            }
+        };
+
+        let action = sync::plan_action(&status, mode);
+        let (label, detail) = describe_action(&action);
+        print!("  {label:<6} {} {} ... ", repo.name, detail);
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
-        match git::clone(&repo.url, &dest, repo.revision.as_deref()) {
+        match sync::execute(&ws, repo, &action) {
             Ok(()) => {
                 println!("ok");
-                cloned += 1;
+                counts.bump(&action);
             }
             Err(err) => {
                 println!("FAILED");
@@ -412,8 +441,14 @@ fn cmd_sync(group_filter: &[String]) -> Result<ExitCode> {
 
     println!();
     println!(
-        "Summary: {cloned} cloned, {skipped} skipped, {} failed",
-        failed.len()
+        "Summary: {} cloned, {} updated, {} reset, {} rebased, {} unchanged, {} skipped, {} failed",
+        counts.cloned,
+        counts.fast_forwarded,
+        counts.reset,
+        counts.rebased,
+        counts.unchanged,
+        counts.skipped,
+        failed.len(),
     );
 
     if !failed.is_empty() {
@@ -424,6 +459,41 @@ fn cmd_sync(group_filter: &[String]) -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Default)]
+struct SyncCounts {
+    cloned: usize,
+    fast_forwarded: usize,
+    reset: usize,
+    rebased: usize,
+    unchanged: usize,
+    skipped: usize,
+}
+
+impl SyncCounts {
+    fn bump(&mut self, action: &Action) {
+        match action {
+            Action::Clone => self.cloned += 1,
+            Action::FastForward { .. } => self.fast_forwarded += 1,
+            Action::Reset { .. } => self.reset += 1,
+            Action::Rebase { .. } => self.rebased += 1,
+            Action::AlreadyOnTarget | Action::NoTarget => self.unchanged += 1,
+            Action::Skip { .. } => self.skipped += 1,
+        }
+    }
+}
+
+fn describe_action(action: &Action) -> (&'static str, String) {
+    match action {
+        Action::Clone => ("clone", String::new()),
+        Action::AlreadyOnTarget => ("ok", "(on target)".into()),
+        Action::NoTarget => ("ok", "(no target)".into()),
+        Action::FastForward { to, .. } => ("ff", format!("→ {}", short_sha(to))),
+        Action::Reset { to } => ("reset", format!("→ {}", short_sha(to))),
+        Action::Rebase { onto } => ("rebase", format!("onto {}", short_sha(onto))),
+        Action::Skip { reason } => ("skip", format!("({reason})")),
+    }
 }
 
 fn not_implemented(cmd: &str) -> Result<()> {

@@ -255,7 +255,8 @@ url  = "{}"
     assert!(out.status.success());
     let s = stdout_of(&out);
     assert!(s.contains("0 cloned"));
-    assert!(s.contains("1 skipped"));
+    // A second sync on a clean, on-target repo counts as "unchanged".
+    assert!(s.contains("1 unchanged"), "{s}");
 }
 
 #[test]
@@ -441,6 +442,208 @@ revision = "main"
 
     let s = stdout_of(&f.gasp(&["status"]));
     assert!(s.contains("ahead"));
+}
+
+/// Push a new commit into `bare_src` (the working repo whose pushes
+/// land in the bare repo we cloned from).
+fn add_upstream_commit(working_src: &Path, bare: &Path, file: &str, contents: &str) {
+    std::fs::write(working_src.join(file), contents).unwrap();
+    run(working_src, "git", &["add", "-A"]);
+    run(
+        working_src,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "advance",
+        ],
+    );
+    run(
+        working_src,
+        "git",
+        &["push", "-q", bare.to_str().unwrap(), "main"],
+    );
+}
+
+fn add_local_commit(repo: &Path, file: &str, contents: &str, msg: &str) {
+    std::fs::write(repo.join(file), contents).unwrap();
+    run(repo, "git", &["add", "-A"]);
+    run(
+        repo,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            msg,
+        ],
+    );
+}
+
+#[test]
+fn sync_fast_forwards_behind_repo() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Advance upstream
+    let src = f._root.path().join("src").join("alpha");
+    add_upstream_commit(&src, &bare, "x", "x\n");
+
+    let out = f.gasp(&["sync"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("1 updated"), "{s}");
+    // Verify the working tree advanced
+    assert!(f.workspace.join("alpha").join("x").is_file());
+}
+
+#[test]
+fn sync_default_skips_when_ahead() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    add_local_commit(&f.workspace.join("alpha"), "local", "x\n", "local");
+
+    let out = f.gasp(&["sync"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("1 skipped"), "{s}");
+    assert!(s.contains("ahead"));
+}
+
+#[test]
+fn sync_default_skips_when_dirty() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Dirty the tree (don't commit)
+    std::fs::write(f.workspace.join("alpha").join("README.md"), "uncommitted\n").unwrap();
+
+    let out = f.gasp(&["sync"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("1 skipped"), "{s}");
+    assert!(s.contains("uncommitted"));
+}
+
+#[test]
+fn sync_reset_clobbers_ahead_and_dirty() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Local commit + dirty change
+    add_local_commit(&f.workspace.join("alpha"), "local", "x\n", "local");
+    std::fs::write(f.workspace.join("alpha").join("README.md"), "dirty\n").unwrap();
+
+    let out = f.gasp(&["sync", "--reset"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("1 reset"), "{s}");
+    // The local-only file is gone after reset
+    assert!(!f.workspace.join("alpha").join("local").exists());
+    // README is back to upstream content
+    let readme = std::fs::read_to_string(f.workspace.join("alpha").join("README.md")).unwrap();
+    assert_eq!(readme, "alpha\n");
+}
+
+#[test]
+fn sync_rebase_resolves_divergence() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Local commit (touches "local"), upstream commit (touches "x") — no conflict
+    add_local_commit(&f.workspace.join("alpha"), "local", "L\n", "local");
+    let src = f._root.path().join("src").join("alpha");
+    add_upstream_commit(&src, &bare, "x", "U\n");
+
+    let out = f.gasp(&["sync", "--rebase"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("1 rebased"), "{s}");
+    // Both upstream and local commit should be present after rebase
+    assert!(f.workspace.join("alpha").join("x").is_file());
+    assert!(f.workspace.join("alpha").join("local").is_file());
 }
 
 #[test]
