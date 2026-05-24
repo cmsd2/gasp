@@ -1,13 +1,21 @@
 //! Live multi-task display used by parallel commands (sync, fetch).
 //!
-//! In a TTY: shows a per-worker spinner while each task runs; on
-//! completion the spinner is replaced by a result line printed above
-//! the still-live overall progress bar. Behaves like the per-package
-//! display in `cargo` / `pip` / `npm`.
+//! Pre-allocates one spinner per job (in submission order) so each
+//! worker has its own fixed position. The cargo / pip pattern:
 //!
-//! Outside a TTY (pipes, CI, tests): all of that auto-disables;
-//! result lines stream to stdout as plain text and the overall bar
-//! is hidden.
+//!   clone  alpha ... ok          <- finished in its slot
+//!     ⠴   beta                   <- running in its slot
+//!     ·   delta                  <- still queued
+//!     ·   zebra
+//!   [1/4] syncing
+//!
+//! As each worker takes its slot it animates, then on completion the
+//! slot is replaced with the final result line. Output order is
+//! therefore the submission order — alphabetical in our case.
+//!
+//! Outside a TTY the bars are hidden; finalize_with_result is a
+//! no-op visually, and the caller is expected to print the buffered
+//! result lines after all workers join.
 
 use std::time::Duration;
 
@@ -16,64 +24,85 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 pub struct LiveDisplay {
     mp: MultiProgress,
-    main: ProgressBar,
+    slots: Vec<ProgressBar>,
+    overall: ProgressBar,
     in_tty: bool,
 }
 
 impl LiveDisplay {
-    /// `verb` is a short label used in the live status line, e.g.
-    /// "syncing" or "fetching".
-    pub fn new(total: u64, verb: &str) -> Self {
+    /// `names` are listed in submission order — typically alphabetic.
+    /// One spinner is pre-allocated per name, in that order, so the
+    /// vertical layout matches the order results will land in.
+    /// `verb` is a short label for the overall bar (e.g. "syncing").
+    pub fn new(names: &[&str], verb: &str) -> Self {
         let in_tty = Term::stderr().is_term();
         let mp = MultiProgress::new();
-        let main = mp.add(ProgressBar::new(total));
-        main.set_style(
+        let slots = names
+            .iter()
+            .map(|name| {
+                let pb = mp.add(ProgressBar::new_spinner());
+                pb.set_style(
+                    ProgressStyle::with_template("  {spinner:.dim} {msg:.dim}")
+                        .expect("static template"),
+                );
+                pb.set_message((*name).to_string());
+                pb
+            })
+            .collect();
+        let overall = mp.add(ProgressBar::new(names.len() as u64));
+        overall.set_style(
             ProgressStyle::with_template(&format!("[{{pos}}/{{len}}] {verb} {{wide_msg}}"))
                 .expect("static template")
                 .progress_chars("=> "),
         );
-        Self { mp, main, in_tty }
+        Self {
+            mp,
+            slots,
+            overall,
+            in_tty,
+        }
     }
 
-    /// Begin a task. In TTY mode returns a handle whose spinner is
-    /// shown until `finish_task` is called with it. In non-TTY mode
-    /// returns `None` and there's no visible "in-flight" indicator.
-    pub fn start_task(&self, name: &str) -> Option<ProgressBar> {
+    /// Mark slot `i` as actively being processed. Replaces the dim
+    /// "queued" appearance with an animated cyan spinner.
+    pub fn mark_running(&self, i: usize, name: &str) {
         if !self.in_tty {
-            return None;
+            return;
         }
-        let s = self.mp.add(ProgressBar::new_spinner());
-        s.set_style(
+        let pb = &self.slots[i];
+        pb.set_style(
             ProgressStyle::with_template("  {spinner:.cyan} {msg}").expect("static template"),
         );
-        s.set_message(name.to_string());
-        s.enable_steady_tick(Duration::from_millis(80));
-        Some(s)
+        pb.set_message(name.to_string());
+        pb.enable_steady_tick(Duration::from_millis(80));
+        self.overall.set_message(name.to_string());
     }
 
-    /// Finalize a task: in TTY mode clears its spinner and prints
-    /// `result_line` above the live region; in non-TTY mode just
-    /// emits the line on stdout. Either way, advances the overall
-    /// progress bar by one.
-    pub fn finish_task(&self, spinner: Option<ProgressBar>, result_line: &str) {
-        if let Some(s) = spinner {
-            s.finish_and_clear();
-            // mp.println goes to stderr (the draw target), above the
-            // overall bar. We mirror to stdout below so the line is
-            // pipeable AND visible in the terminal.
-            self.mp.println(result_line).ok();
-            // Plain println would interleave with the live region;
-            // mp.println handles redraw. No second print needed when
-            // we have the spinner.
-        } else {
-            println!("{result_line}");
+    /// Finalize slot `i` with the worker's result line. The spinner
+    /// is replaced in place with the line; the slot remains visible
+    /// as part of the scrollback, in its submitted position.
+    pub fn finish_slot(&self, i: usize, result_line: &str) {
+        if self.in_tty {
+            let pb = &self.slots[i];
+            pb.disable_steady_tick();
+            pb.set_style(ProgressStyle::with_template("{msg}").expect("static template"));
+            pb.finish_with_message(result_line.to_string());
         }
-        self.main.inc(1);
+        self.overall.inc(1);
     }
 
-    /// Tear down the live region (must be called before final summary
-    /// output to avoid leaving the bar dangling on stderr).
+    /// Tear down the overall bar. Slot bars stay in place — they're
+    /// the visible record of the run.
     pub fn finish(self) {
-        self.main.finish_and_clear();
+        self.overall.finish_and_clear();
+        // Keep `mp` alive until here so its draw thread isn't dropped
+        // before the finished slot bars get their final render.
+        drop(self.mp);
+    }
+
+    /// True if the display is hidden (non-TTY). Callers use this to
+    /// decide whether to print result lines on stdout after the run.
+    pub fn is_hidden(&self) -> bool {
+        !self.in_tty
     }
 }

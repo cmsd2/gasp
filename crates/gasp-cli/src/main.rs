@@ -586,6 +586,12 @@ fn cmd_fetch(
     if !group_filter.is_empty() {
         repos.retain(|r| r.groups.iter().any(|g| group_filter.contains(g)));
     }
+    // Stable, alphabetical processing order. For parallel commands
+    // (sync, fetch) this controls the dispatch order — completion
+    // order is still nondeterministic — so spinners appear and tasks
+    // start in name order. For foreach it determines the full output
+    // ordering since it's sequential.
+    repos.sort_by(|a, b| a.name.cmp(&b.name));
     if repos.is_empty() {
         println!("(no repos match)");
         return Ok(ExitCode::SUCCESS);
@@ -597,13 +603,15 @@ fn cmd_fetch(
         .build()
         .context("building rayon pool")?;
 
-    let display = LiveDisplay::new(repos.len() as u64, "fetching");
+    let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+    let display = LiveDisplay::new(&names, "fetching");
 
     let outcomes: Vec<FetchOutcome> = pool.install(|| {
         repos
             .par_iter()
-            .map(|repo| {
-                let spinner = display.start_task(&repo.name);
+            .enumerate()
+            .map(|(i, repo)| {
+                display.mark_running(i, &repo.name);
                 let dest = ws.repo_path(&repo.path);
                 let outcome = if !dest.exists() {
                     FetchOutcome::Skipped {
@@ -621,12 +629,19 @@ fn cmd_fetch(
                         },
                     }
                 };
-                display.finish_task(spinner, &outcome.line());
+                display.finish_slot(i, &outcome.line());
                 outcome
             })
             .collect()
     });
+    let was_hidden = display.is_hidden();
     display.finish();
+
+    if was_hidden {
+        for o in &outcomes {
+            println!("{}", o.line());
+        }
+    }
 
     let mut ok = 0usize;
     let mut skipped = 0usize;
@@ -748,6 +763,7 @@ fn cmd_sync(
     if !group_filter.is_empty() {
         repos.retain(|r| r.groups.iter().any(|g| group_filter.contains(g)));
     }
+    repos.sort_by(|a, b| a.name.cmp(&b.name));
 
     if repos.is_empty() {
         println!("(no repos match)");
@@ -760,21 +776,33 @@ fn cmd_sync(
         .build()
         .context("building rayon pool")?;
 
-    let display = LiveDisplay::new(repos.len() as u64, "syncing");
+    let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+    let display = LiveDisplay::new(&names, "syncing");
 
     let outcomes: Vec<SyncOutcome> = pool.install(|| {
         repos
             .par_iter()
-            .map(|repo| {
-                let spinner = display.start_task(&repo.name);
+            .enumerate()
+            .map(|(i, repo)| {
+                display.mark_running(i, &repo.name);
                 let outcome = sync_one(&ws, repo, mode);
-                display.finish_task(spinner, &outcome.line());
+                display.finish_slot(i, &outcome.line());
                 outcome
             })
             .collect()
     });
 
+    let was_hidden = display.is_hidden();
     display.finish();
+
+    // In a TTY the finished slot bars are the visible record. Outside
+    // a TTY (pipes, CI, tests) those bars rendered nothing, so we
+    // print the buffered lines to stdout in submission (alpha) order.
+    if was_hidden {
+        for o in &outcomes {
+            println!("{}", o.line());
+        }
+    }
 
     let mut counts = SyncCounts::default();
     let mut failed: Vec<&SyncOutcome> = Vec::new();
@@ -1174,6 +1202,7 @@ fn cmd_foreach(group_filter: &[String], command: &[String]) -> Result<ExitCode> 
     if !group_filter.is_empty() {
         repos.retain(|r| r.groups.iter().any(|g| group_filter.contains(g)));
     }
+    repos.sort_by(|a, b| a.name.cmp(&b.name));
 
     if repos.is_empty() {
         println!("(no repos match)");
