@@ -1122,6 +1122,77 @@ fn manifest_init_graduates_loose_workspace() {
 }
 
 #[test]
+fn manifest_push_sets_upstream_then_uses_it() {
+    let f = Fixture::new();
+    // A bare remote that will receive the push.
+    let remote = f._root.path().join("remote.git");
+    run(
+        f._root.path(),
+        "git",
+        &["init", "--bare", "-q", remote.to_str().unwrap()],
+    );
+
+    let seed = f.write_manifest("version = 1\n");
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(
+        f.gasp(&["manifest", "init", "--remote", remote.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    // First push: no upstream yet, command should auto-set it.
+    let out = f.gasp(&["manifest", "push"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("set upstream to origin/main"), "{s}");
+
+    // Make a second commit, push again — upstream is configured this time.
+    let manifest_repo = f.workspace.join(".workspace/manifest");
+    std::fs::write(manifest_repo.join("notes.md"), "hi\n").unwrap();
+    run(&manifest_repo, "git", &["add", "-A"]);
+    run(
+        &manifest_repo,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "note",
+        ],
+    );
+
+    let out = f.gasp(&["manifest", "push"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!stdout_of(&out).contains("set upstream"));
+}
+
+#[test]
+fn manifest_push_errors_in_loose_mode() {
+    let f = Fixture::new();
+    let seed = f.write_manifest("version = 1\n");
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    let out = f.gasp(&["manifest", "push"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("loose mode"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn manifest_init_errors_if_already_cloned() {
     let f = Fixture::new();
     let seed = f.write_manifest("version = 1\n");

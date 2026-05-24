@@ -78,6 +78,22 @@ pub fn pull_ff_only(repo: &Path) -> Result<()> {
     )
 }
 
+/// `git -C <repo> push`. Uses the current branch's tracking info.
+pub fn push(repo: &Path) -> Result<()> {
+    run_git(&mut git_in(repo, ["push"]), "push", "origin", repo)
+}
+
+/// `git -C <repo> push -u <remote> <branch>`. Sets the branch's
+/// upstream to `<remote>/<branch>` on success.
+pub fn push_set_upstream(repo: &Path, remote: &str, branch: &str) -> Result<()> {
+    run_git(
+        &mut git_in(repo, ["push", "-u", remote, branch]),
+        "push --set-upstream",
+        &format!("{remote}/{branch}"),
+        repo,
+    )
+}
+
 fn git_in<I, S>(repo: &Path, args: I) -> Command
 where
     I: IntoIterator<Item = S>,

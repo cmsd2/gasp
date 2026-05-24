@@ -56,6 +56,7 @@ gasp sync
 | --- | --- |
 | `gasp init <source>` | Initialize a workspace. `<source>` is a path to a local `workspace.toml`, or a git URL / `owner/repo` shorthand for a manifest repository. |
 | `gasp manifest init [--name X] [--remote URL] [--push]` | Create a fresh manifest repo. Works from an empty directory (bootstraps a default template) or graduates an existing loose-file workspace. |
+| `gasp manifest push` | Push commits from the cloned manifest repo to its `origin`. Auto-sets the upstream on first push. |
 | `gasp sync [--on-conflict refuse\|rebase\|reset] [--group X] [-j N] [--no-update-manifest] [--no-update-context]` | Clone missing repos; update existing ones. Fast-forwards by default. In cloned-manifest mode, pulls the manifest first; if `[context]` is configured, refreshes the aggregated instructions and skill symlinks afterward. |
 | `gasp context sync` | Run the agent-context aggregation explicitly. No-op when the manifest has no `[context]` section. |
 | `gasp status [--show-manifest] [--strict]` | Show per-repo state (clean / dirty / ahead / behind / diverged / missing) with upstream-tracking annotations. `--show-manifest` adds a line for the cloned-manifest repo. `--strict` exits non-zero on any issue (CI-friendly). |
@@ -198,6 +199,61 @@ the workspace-level globs (use `""` to opt a repo out).
 To use a custom template, set `[context].template = "path/to/your.j2"`
 (relative to the workspace root). The built-in template is the default
 when this field is unset.
+
+## Branches and worktrees
+
+Each child repo is just a normal git checkout — you can branch, switch,
+and worktree-add as usual, and `gasp` will tell you what state things
+are in.
+
+**Switching branches within a repo:**
+
+```sh
+cd backend
+git switch -c feature-x
+# edit ...
+git push -u origin feature-x
+```
+
+`gasp status` will report `feature-x ↑` for that repo (the `↑` flags an
+upstream is configured). When you're ready, `gasp sync` will fast-forward
+it on the next sync if the manifest's target revision moves and the
+branch can reach it. If the branch can't ff (you've diverged), use
+`--on-conflict rebase` or `--on-conflict reset` per the section below.
+
+**Pinning a repo to a specific branch via the manifest:**
+
+```toml
+[[repos]]
+name     = "backend"
+url      = "acme/backend"
+revision = "main"      # or "release/v2", a tag, or a sha
+```
+
+Update the field, commit (if in cloned-manifest mode), and the next
+`gasp sync` will move the repo to that revision.
+
+**Git worktrees (parallel checkouts of the same repo):**
+
+```sh
+cd backend
+git worktree add ../backend-feature -b feature-x
+```
+
+`gasp status` lists each worktree under its parent repo:
+
+```
+NAME                STATE  HEAD     BRANCH      DETAIL
+backend             clean  abc1234  main ↑      on target main
+  ↳ backend-feature dirty  def5678  feature-x   worktree at .../backend-feature
+```
+
+Worktrees aren't independently managed by `gasp` — they live alongside
+the parent and inherit its remote configuration. Treat them as
+informational: `gasp status` makes them visible so you don't forget
+about unfinished work in a sibling checkout. Drop one with `git -C
+backend worktree remove ../backend-feature` when you're done; `gasp
+status` will stop reporting it.
 
 ## Sync conflict modes
 

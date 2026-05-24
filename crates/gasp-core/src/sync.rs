@@ -153,6 +153,7 @@ mod tests {
             name: "r".into(),
             path: PathBuf::from("r"),
             state: RepoState::Present(info),
+            worktrees: Vec::new(),
         }
     }
 
@@ -179,6 +180,7 @@ mod tests {
             name: "r".into(),
             path: PathBuf::from("r"),
             state: RepoState::Missing,
+            worktrees: Vec::new(),
         }
     }
 

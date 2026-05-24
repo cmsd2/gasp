@@ -3,7 +3,7 @@
 //! Used by `gasp status`, and (later) by `gasp sync` as the planning
 //! step that decides what action — if any — each repo needs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use git2::{Oid, Repository};
 
@@ -18,6 +18,23 @@ pub struct RepoStatus {
     /// Path as written in the manifest (may be relative).
     pub path: PathBuf,
     pub state: RepoState,
+    /// Linked git worktrees of this repo (other than the main one),
+    /// each with its own checkout / branch / dirty state. Empty for
+    /// repos without additional worktrees, or when the repo is
+    /// missing.
+    pub worktrees: Vec<WorktreeStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeStatus {
+    /// git's internal name for the worktree (the basename of
+    /// `.git/worktrees/<name>/`).
+    pub name: String,
+    /// Absolute path to the worktree's working directory.
+    pub path: PathBuf,
+    pub head: String,
+    pub branch: Option<String>,
+    pub dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,30 +119,58 @@ pub fn inspect_manifest(workspace: &Workspace) -> Result<Option<ManifestStatus>>
 pub fn inspect(workspace: &Workspace, repo: &Repo) -> Result<RepoStatus> {
     let abs = workspace.repo_path(&repo.path);
 
-    let state = if !abs.exists() {
-        RepoState::Missing
+    let (state, worktrees) = if !abs.exists() {
+        (RepoState::Missing, Vec::new())
     } else if !git::local::is_repo(&abs) {
-        RepoState::NotARepo
+        (RepoState::NotARepo, Vec::new())
     } else {
         let head = git::local::head_sha(&abs)?;
         let branch = git::local::current_branch(&abs)?;
         let dirty = git::local::is_dirty(&abs)?;
         let has_upstream = git::local::has_upstream(&abs)?;
         let target = build_target_state(&abs, repo, &head)?;
-        RepoState::Present(RepoInfo {
-            head,
-            branch,
-            dirty,
-            target,
-            has_upstream,
-        })
+        let worktrees = collect_worktrees(&abs)?;
+        (
+            RepoState::Present(RepoInfo {
+                head,
+                branch,
+                dirty,
+                target,
+                has_upstream,
+            }),
+            worktrees,
+        )
     };
 
     Ok(RepoStatus {
         name: repo.name.clone(),
         path: repo.path.clone(),
         state,
+        worktrees,
     })
+}
+
+fn collect_worktrees(repo_path: &Path) -> Result<Vec<WorktreeStatus>> {
+    let mut out = Vec::new();
+    for (name, wt_path) in git::local::worktrees(repo_path)? {
+        if !wt_path.is_dir() {
+            // Stale worktree metadata (the working directory was
+            // deleted manually). Skip silently — the user can prune
+            // with `git worktree prune` when they care.
+            continue;
+        }
+        let head = git::local::head_sha(&wt_path)?;
+        let branch = git::local::current_branch(&wt_path)?;
+        let dirty = git::local::is_dirty(&wt_path)?;
+        out.push(WorktreeStatus {
+            name,
+            path: wt_path,
+            head,
+            branch,
+            dirty,
+        });
+    }
+    Ok(out)
 }
 
 fn build_target_state(repo_path: &std::path::Path, repo: &Repo, head: &str) -> Result<TargetState> {
@@ -430,6 +475,22 @@ mod tests {
             } => {}
             other => panic!("expected Ahead, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn worktrees_are_detected() {
+        let f = fix();
+        // Add a worktree on a new branch.
+        run(
+            &f.repo,
+            &["worktree", "add", "-q", "../r-feature", "-b", "feature"],
+        );
+        let s = inspect(&f.workspace, &first_repo(&manifest(&f))).unwrap();
+        assert_eq!(s.worktrees.len(), 1);
+        let wt = &s.worktrees[0];
+        assert_eq!(wt.branch.as_deref(), Some("feature"));
+        assert!(!wt.dirty);
+        assert!(wt.path.ends_with("r-feature"));
     }
 
     #[test]

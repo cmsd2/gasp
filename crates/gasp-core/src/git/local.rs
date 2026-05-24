@@ -91,6 +91,22 @@ pub fn is_repo(path: &Path) -> bool {
     Repository::open(path).is_ok()
 }
 
+/// Linked worktrees of the repo at `path` (not counting the main
+/// working tree itself). Returns `(name, working_tree_path)` pairs.
+/// Worktrees with invalid metadata are silently skipped.
+pub fn worktrees(path: &Path) -> Result<Vec<(String, std::path::PathBuf)>> {
+    let repo = open(path)?;
+    let names = repo.worktrees().map_err(map_err("list worktrees", path))?;
+    let mut out = Vec::new();
+    for entry in names.iter() {
+        let Some(name) = entry else { continue };
+        if let Ok(wt) = repo.find_worktree(name) {
+            out.push((name.to_string(), wt.path().to_path_buf()));
+        }
+    }
+    Ok(out)
+}
+
 /// URL of a remote configured in the repo at `path`. Returns `None`
 /// if the remote isn't configured at all.
 pub fn remote_url(path: &Path, remote: &str) -> Result<Option<String>> {

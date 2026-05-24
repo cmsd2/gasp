@@ -187,6 +187,10 @@ enum ManifestCmd {
         #[arg(long, requires = "remote")]
         push: bool,
     },
+
+    /// Push commits from the cloned manifest repo to its origin remote.
+    /// Sets the branch's upstream automatically if it isn't configured.
+    Push,
 }
 
 fn main() -> ExitCode {
@@ -246,6 +250,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 cmd_manifest_init(name.as_deref(), remote.as_deref(), push)
                     .map(|()| ExitCode::SUCCESS)
             }
+            ManifestCmd::Push => cmd_manifest_push().map(|()| ExitCode::SUCCESS),
         },
         Command::Context { cmd } => match cmd {
             ContextCmd::Sync => cmd_context_sync().map(|()| ExitCode::SUCCESS),
@@ -363,23 +368,36 @@ fn cmd_status(strict: bool, show_manifest: bool) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let rows: Vec<StatusRow> = repos
-        .iter()
-        .map(|r| {
-            let s = status::inspect(&ws, r)?;
-            Ok(StatusRow::from(&s))
-        })
-        .collect::<Result<_>>()?;
+    let mut rows: Vec<StatusRow> = Vec::with_capacity(repos.len());
+    let mut all_inspected: Vec<status::RepoStatus> = Vec::with_capacity(repos.len());
+    for r in &repos {
+        let s = status::inspect(&ws, r)?;
+        rows.push(StatusRow::from(&s));
+        all_inspected.push(s);
+    }
 
     let mut t = Table::new(&["NAME", "STATE", "HEAD", "BRANCH", "DETAIL"]);
-    for r in &rows {
+    for (row, inspected) in rows.iter().zip(all_inspected.iter()) {
         t.row([
-            r.name.clone(),
-            r.state.clone(),
-            r.head.clone(),
-            r.branch.clone(),
-            r.detail.clone(),
+            row.name.clone(),
+            row.state.clone(),
+            row.head.clone(),
+            row.branch.clone(),
+            row.detail.clone(),
         ]);
+        // One sub-row per linked worktree, indented with a leading
+        // arrow so it visually nests under its repo.
+        for wt in &inspected.worktrees {
+            let (state, head, branch_label) = describe_worktree(wt);
+            let detail = format!("worktree at {}", wt.path.display());
+            t.row([
+                format!("  ↳ {}", wt.name),
+                state,
+                head,
+                branch_label,
+                detail,
+            ]);
+        }
     }
     t.print();
 
@@ -449,6 +467,13 @@ impl StatusRow {
             is_clean,
         }
     }
+}
+
+fn describe_worktree(wt: &status::WorktreeStatus) -> (String, String, String) {
+    let state = if wt.dirty { "dirty" } else { "clean" }.to_string();
+    let head = short_sha(&wt.head);
+    let branch = wt.branch.clone().unwrap_or_else(|| "(detached)".into());
+    (state, head, branch)
 }
 
 fn classify(info: &gasp_core::status::RepoInfo) -> (String, String) {
@@ -766,6 +791,45 @@ fn run_context_sync(ws: &Workspace) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_manifest_push() -> Result<()> {
+    use gasp_core::git::{local, remote};
+    use gasp_core::workspace::ManifestMode;
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    if ws.manifest_mode() != ManifestMode::Cloned {
+        anyhow::bail!(
+            "no cloned manifest repo to push (workspace is in loose mode; run `gasp manifest init` first)"
+        );
+    }
+    let repo = ws.manifest_repo_dir();
+
+    // If the current branch already tracks an upstream, a plain push
+    // does the right thing. Otherwise we need `git push -u origin
+    // <branch>` to register tracking.
+    if local::has_upstream(&repo)? {
+        remote::push(&repo)?;
+        println!("Pushed manifest from {}", repo.display());
+    } else {
+        let branch = local::current_branch(&repo)?.ok_or_else(|| {
+            anyhow::anyhow!("manifest repo HEAD is detached; check out a branch before pushing")
+        })?;
+        if local::remote_url(&repo, "origin")?.is_none() {
+            anyhow::bail!(
+                "no `origin` remote configured at {}. Add it first: \
+                 `git -C {0} remote add origin <URL>`",
+                repo.display()
+            );
+        }
+        remote::push_set_upstream(&repo, "origin", &branch)?;
+        println!(
+            "Pushed manifest from {} (set upstream to origin/{branch})",
+            repo.display()
+        );
+    }
+    Ok(())
 }
 
 fn cmd_manifest_init(name: Option<&str>, remote: Option<&str>, push: bool) -> Result<()> {
