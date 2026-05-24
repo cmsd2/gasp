@@ -14,6 +14,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Write a skeleton workspace.toml ready to be filled in.
+    New {
+        /// Where to write the manifest. Defaults to ./workspace.toml.
+        path: Option<PathBuf>,
+    },
+
     /// Initialize a workspace from a manifest file.
     Init {
         /// Path to the workspace.toml manifest to use.
@@ -93,6 +99,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Command::New { path } => cmd_new(path.as_deref()).map(|()| ExitCode::SUCCESS),
         Command::Init { manifest } => cmd_init(&manifest).map(|()| ExitCode::SUCCESS),
         Command::List => cmd_list().map(|()| ExitCode::SUCCESS),
         Command::Sync { groups, .. } => cmd_sync(&groups),
@@ -103,6 +110,52 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Remove { .. } => not_implemented("remove").map(|()| ExitCode::SUCCESS),
         Command::Doctor => not_implemented("doctor").map(|()| ExitCode::SUCCESS),
     }
+}
+
+const SKELETON: &str = r#"# gasp workspace manifest.
+# See https://github.com/cmsd2/gasp for documentation.
+
+version = 1
+
+# Defaults applied to every repo unless overridden.
+[defaults]
+revision = "main"
+remote   = "origin"
+host     = "github.com"
+
+# Example repo entries. Replace with your own:
+#
+# [[repos]]
+# name     = "frontend"
+# url      = "acme/frontend"          # owner/repo shorthand → defaults.host
+# revision = "main"                   # branch, tag, or sha
+# # path   = "services/frontend"      # default = repo name
+# # remote = "origin"                 # default = defaults.remote
+# # groups = ["web"]                  # for `gasp sync --group`
+#
+# [[repos]]
+# name = "shared-lib"
+# url  = "git@gitlab.example.com:platform/shared.git"
+"#;
+
+fn cmd_new(path: Option<&std::path::Path>) -> Result<()> {
+    let default = PathBuf::from("workspace.toml");
+    let target = path.unwrap_or(&default);
+
+    if target.exists() {
+        anyhow::bail!("refusing to overwrite existing file: {}", target.display());
+    }
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        anyhow::bail!("parent directory does not exist: {}", parent.display());
+    }
+
+    std::fs::write(target, SKELETON).with_context(|| format!("writing {}", target.display()))?;
+    println!("Wrote skeleton manifest to {}", target.display());
+    println!("Next: edit it, then run `gasp init {}`.", target.display());
+    Ok(())
 }
 
 fn cmd_init(manifest: &std::path::Path) -> Result<()> {

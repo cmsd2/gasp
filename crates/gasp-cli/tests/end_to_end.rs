@@ -94,6 +94,53 @@ fn stdout_of(out: &std::process::Output) -> String {
 }
 
 #[test]
+fn new_writes_skeleton_to_default_path() {
+    let f = Fixture::new();
+    let out = f.gasp(&["new"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let manifest = f.workspace.join("workspace.toml");
+    assert!(manifest.is_file());
+    let body = std::fs::read_to_string(&manifest).unwrap();
+    assert!(body.contains("version = 1"));
+    assert!(body.contains("[defaults]"));
+}
+
+#[test]
+fn new_skeleton_is_a_valid_manifest_for_init() {
+    let f = Fixture::new();
+    assert!(f.gasp(&["new"]).status.success());
+    let out = f.gasp(&["init", "workspace.toml"]);
+    assert!(
+        out.status.success(),
+        "skeleton should be parseable: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn new_refuses_to_overwrite_existing_file() {
+    let f = Fixture::new();
+    std::fs::write(f.workspace.join("workspace.toml"), "already here\n").unwrap();
+    let out = f.gasp(&["new"]);
+    assert!(!out.status.success());
+    let body = std::fs::read_to_string(f.workspace.join("workspace.toml")).unwrap();
+    assert_eq!(body, "already here\n");
+}
+
+#[test]
+fn new_writes_to_explicit_path() {
+    let f = Fixture::new();
+    let dest = f.workspace.join("custom-name.toml");
+    let out = f.gasp(&["new", dest.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(dest.is_file());
+}
+
+#[test]
 fn init_creates_dot_workspace_with_manifest_copy() {
     let f = Fixture::new();
     let seed = f.write_manifest("version = 1\n");
