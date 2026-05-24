@@ -15,6 +15,7 @@ pub struct AddArgs<'a> {
     pub revision: Option<&'a str>,
     pub path: Option<&'a Path>,
     pub groups: &'a [String],
+    pub kind: Option<&'a str>,
 }
 
 /// Append a `[[repos]]` block to the manifest file.
@@ -37,6 +38,9 @@ pub fn add_repo(manifest_path: &Path, args: &AddArgs<'_>) -> Result<()> {
     }
     if let Some(p) = args.path {
         t["path"] = value(p.display().to_string());
+    }
+    if let Some(k) = args.kind {
+        t["kind"] = value(k);
     }
     if !args.groups.is_empty() {
         let mut arr = Array::new();
@@ -125,6 +129,7 @@ mod tests {
                 revision: Some("main"),
                 path: None,
                 groups: &[],
+                kind: None,
             },
         )
         .unwrap();
@@ -148,6 +153,7 @@ mod tests {
                 revision: None,
                 path: None,
                 groups: &[],
+                kind: None,
             },
         )
         .unwrap_err();
@@ -166,12 +172,32 @@ mod tests {
                 revision: None,
                 path: None,
                 groups: &[],
+                kind: None,
             },
         )
         .unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("# top comment"));
         assert!(body.contains("# trailing comment"));
+    }
+
+    #[test]
+    fn add_with_kind_serializes_field() {
+        let (_d, path) = tmp_manifest("version = 1\n");
+        add_repo(
+            &path,
+            &AddArgs {
+                name: "tools",
+                url: "acme/tools",
+                revision: None,
+                path: None,
+                groups: &[],
+                kind: Some("skills"),
+            },
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("kind = \"skills\""), "{body}");
     }
 
     #[test]
@@ -185,6 +211,7 @@ mod tests {
                 revision: None,
                 path: Some(Path::new("services/beta")),
                 groups: &["api".into(), "web".into()],
+                kind: None,
             },
         )
         .unwrap();
@@ -230,6 +257,7 @@ url = "acme/beta"
                 revision: Some("main"),
                 path: None,
                 groups: &[],
+                kind: None,
             },
         )
         .unwrap();

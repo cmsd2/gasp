@@ -118,17 +118,26 @@ enum Command {
     },
 
     /// Add a repo to the manifest.
+    ///
+    /// If <URL> is omitted and a git repo already exists at the target
+    /// path (default: `<name>` under the workspace root), the URL is
+    /// inferred from that repo's `origin` remote.
     Add {
         /// Logical name for the repo.
         name: String,
-        /// URL (owner/repo shorthand or full git URL).
-        url: String,
+        /// URL (owner/repo shorthand or full git URL). Optional — see
+        /// command description for the inference rules.
+        url: Option<String>,
         #[arg(long)]
         revision: Option<String>,
         #[arg(long)]
         path: Option<PathBuf>,
         #[arg(long = "group", value_name = "GROUP")]
         groups: Vec<String>,
+        /// Freeform classification (e.g. `code`, `skills`, `adrs`,
+        /// `data`, `docs`). Used by `gasp context sync` to group repos.
+        #[arg(long)]
+        kind: Option<String>,
     },
 
     /// Remove a repo from the manifest.
@@ -220,8 +229,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
             revision,
             path,
             groups,
-        } => cmd_add(&name, &url, revision.as_deref(), path.as_deref(), &groups)
-            .map(|()| ExitCode::SUCCESS),
+            kind,
+        } => cmd_add(
+            &name,
+            url.as_deref(),
+            revision.as_deref(),
+            path.as_deref(),
+            &groups,
+            kind.as_deref(),
+        )
+        .map(|()| ExitCode::SUCCESS),
         Command::Remove { name } => cmd_remove(&name).map(|()| ExitCode::SUCCESS),
         Command::Doctor => cmd_doctor(),
         Command::Manifest { cmd } => match cmd {
@@ -983,25 +1000,67 @@ fn cmd_foreach(group_filter: &[String], command: &[String]) -> Result<ExitCode> 
 
 fn cmd_add(
     name: &str,
-    url: &str,
+    url: Option<&str>,
     revision: Option<&str>,
     path: Option<&std::path::Path>,
     groups: &[String],
+    kind: Option<&str>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
+
+    let url_owned = match url {
+        Some(u) => u.to_string(),
+        None => infer_url_from_disk(&ws, name, path)?,
+    };
+
     edit::add_repo(
         &ws.manifest_path(),
         &AddArgs {
             name,
-            url,
+            url: &url_owned,
             revision,
             path,
             groups,
+            kind,
         },
     )?;
     println!("Added '{name}' to manifest.");
     Ok(())
+}
+
+/// Look up the `origin` remote URL of an already-cloned repo so the
+/// user doesn't have to retype it. Errors with a clear message when
+/// nothing's cloned to read from.
+fn infer_url_from_disk(
+    ws: &Workspace,
+    name: &str,
+    path: Option<&std::path::Path>,
+) -> Result<String> {
+    let target_path = match path {
+        Some(p) => ws.repo_path(p),
+        None => ws.repo_path(std::path::Path::new(name)),
+    };
+    if !target_path.is_dir() {
+        anyhow::bail!(
+            "no URL provided and no clone at {} to infer from",
+            target_path.display()
+        );
+    }
+    if !gasp_core::git::local::is_repo(&target_path) {
+        anyhow::bail!(
+            "no URL provided and {} is not a git repository",
+            target_path.display()
+        );
+    }
+    let url = gasp_core::git::local::remote_url(&target_path, "origin")?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no URL provided and {} has no 'origin' remote",
+            target_path.display()
+        )
+    })?;
+    eprintln!("inferred url from {}: {url}", target_path.display());
+    Ok(url)
 }
 
 fn cmd_remove(name: &str) -> Result<()> {

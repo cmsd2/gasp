@@ -1138,6 +1138,45 @@ fn manifest_init_errors_if_already_cloned() {
 }
 
 #[test]
+fn add_infers_url_from_existing_clone() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest("version = 1\n");
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+
+    // Manually clone into the workspace before calling `gasp add`.
+    run(
+        &f.workspace,
+        "git",
+        &["clone", "-q", bare.to_str().unwrap(), "alpha"],
+    );
+
+    // No URL given; gasp should pick it up from origin.
+    let out = f.gasp(&["add", "alpha", "--kind", "code"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let manifest = std::fs::read_to_string(f.workspace.join(".workspace/workspace.toml")).unwrap();
+    assert!(manifest.contains(bare.to_str().unwrap()), "{manifest}");
+    assert!(manifest.contains("kind = \"code\""), "{manifest}");
+}
+
+#[test]
+fn add_without_url_or_clone_errors_clearly() {
+    let f = Fixture::new();
+    let seed = f.write_manifest("version = 1\n");
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+
+    let out = f.gasp(&["add", "ghost"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no URL provided"), "{stderr}");
+    assert!(stderr.contains("no clone at"), "{stderr}");
+}
+
+#[test]
 fn add_then_remove_round_trips() {
     let f = Fixture::new();
     let seed = f.write_manifest("version = 1\n");

@@ -91,6 +91,21 @@ pub fn is_repo(path: &Path) -> bool {
     Repository::open(path).is_ok()
 }
 
+/// URL of a remote configured in the repo at `path`. Returns `None`
+/// if the remote isn't configured at all.
+pub fn remote_url(path: &Path, remote: &str) -> Result<Option<String>> {
+    let repo = open(path)?;
+    match repo.find_remote(remote) {
+        Ok(r) => Ok(r.url().map(|s| s.to_string())),
+        Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(source) => Err(Error::LibGit {
+            operation: "find_remote".into(),
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// True if the currently-checked-out branch has an upstream tracking
 /// branch configured. Detached HEAD returns `false`. Used to avoid
 /// calling `git pull` in repos where it would just fail with "no
