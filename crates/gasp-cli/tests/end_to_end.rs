@@ -357,6 +357,93 @@ revision = "v1"
 }
 
 #[test]
+fn status_reports_missing_clean_and_dirty() {
+    let f = Fixture::new();
+    let a = f.make_bare_repo("alpha");
+    let b = f.make_bare_repo("beta");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+[[repos]]
+name = "beta"
+url  = "{}"
+revision = "main"
+[[repos]]
+name = "missing-one"
+url  = "{}"
+"#,
+        a.display(),
+        b.display(),
+        a.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    // Clone only alpha and beta — skip the third by deleting it after clone
+    assert!(f.gasp(&["sync"]).status.success());
+    std::fs::remove_dir_all(f.workspace.join("missing-one")).unwrap();
+
+    // Dirty alpha
+    std::fs::write(f.workspace.join("alpha").join("README.md"), "modified\n").unwrap();
+
+    let out = f.gasp(&["status"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("alpha"));
+    assert!(s.contains("dirty"));
+    assert!(s.contains("beta"));
+    assert!(s.contains("clean"));
+    assert!(s.contains("missing-one"));
+    assert!(s.contains("missing"));
+}
+
+#[test]
+fn status_reports_ahead_after_local_commit() {
+    let f = Fixture::new();
+    let a = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        a.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Add a local commit in the workspace clone
+    let repo = f.workspace.join("alpha");
+    std::fs::write(repo.join("local"), "x\n").unwrap();
+    run(&repo, "git", &["add", "-A"]);
+    run(
+        &repo,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "local",
+        ],
+    );
+
+    let s = stdout_of(&f.gasp(&["status"]));
+    assert!(s.contains("ahead"));
+}
+
+#[test]
 fn sync_group_filter_restricts_clones() {
     let f = Fixture::new();
     let a = f.make_bare_repo("aa");

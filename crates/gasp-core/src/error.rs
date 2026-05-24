@@ -65,6 +65,14 @@ pub enum Error {
         target: String,
         stderr: String,
     },
+
+    #[error("libgit2 error during {operation} at {path}: {source}")]
+    LibGit {
+        operation: String,
+        path: PathBuf,
+        #[source]
+        source: git2::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

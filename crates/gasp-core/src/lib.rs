@@ -1,6 +1,7 @@
 pub mod error;
 pub mod git;
 pub mod manifest;
+pub mod status;
 pub mod url;
 pub mod workspace;
 
