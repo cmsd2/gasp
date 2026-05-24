@@ -164,41 +164,52 @@ one step.
 
 ## Agent context
 
-When the manifest has a `[context]` section, `gasp` will aggregate
-agent-relevant files from each child repo:
+When the manifest has a `[context]` section, `gasp` generates a
+workspace-root file (default `CLAUDE.md`) that orients agents to the
+shape of the workspace, and symlinks per-repo skills into a
+workspace-local directory.
 
-- **Instructions:** every file matching `[context].include` in each repo
-  (default `CLAUDE.md`) is concatenated through a Jinja template into a
-  single workspace-root file (default `CLAUDE.md`). Repos are grouped
-  by `kind` so the agent sees a structured layout.
-- **Skills:** every file matching `[context].skills_include`
-  (default `.claude/skills/*.md`) is **symlinked** into a workspace-local
-  directory (default `.claude/skills/`). Updates to the source files
-  are reflected immediately; no regeneration needed.
+**What's in the generated file:**
 
-The aggregated instructions file is **splice-managed** between markers:
+- An optional **preamble** — the verbatim contents of a file you
+  specify (`[context].preamble`, usually `preamble.md` inside the
+  manifest repo). This is where you put workspace-level instructions
+  that should always be in scope.
+- A **layout** of all repos, grouped by `kind`, with relative paths
+  and a pointer to each repo's own `CLAUDE.md` (Claude Code
+  automatically picks those up when you're working inside the repo,
+  so they're not duplicated here).
+- A list of **skills** that have been linked into `[context].skills_dir`.
 
-```
-<!-- BEGIN gasp:context — do not edit -->
-... generated content ...
-<!-- END gasp:context -->
-```
+**What it isn't:** the contents of per-repo `CLAUDE.md` files. Agents
+walk up from the working directory and pick those up themselves —
+inlining them in the workspace root just doubles the token cost. If
+you want a custom shape, point `[context].template` at your own
+Jinja template; every per-repo `CLAUDE.md` is still passed in via
+`repos[i].instructions[].content` for that case.
 
-Anything you write above the BEGIN marker or below the END marker is
-preserved across re-syncs — useful for a personal preamble or extra
-project-level notes.
+**The output file is fully managed.** `gasp context sync` overwrites
+it on every run. Hand-edits will be lost. For persistent custom
+content, edit the preamble file instead.
 
-`gasp sync` runs the aggregation automatically after a successful repo
-sync; pass `--no-update-context` to skip. `gasp context sync` runs it
-on demand. Nothing is ever written to `~/.claude/` — everything stays
-inside the workspace.
+**Skills** matching `[context].skills_include` (default
+`.claude/skills/*.md`) are **symlinked** into `[context].skills_dir`
+(default `.claude/skills/`). Updates to the source files are reflected
+immediately — no regeneration needed. Nothing is ever written to
+`~/.claude/`; everything stays inside the workspace.
 
-Per-repo `context_include` / `context_skills_include` fields override
-the workspace-level globs (use `""` to opt a repo out).
+**Bootstrap.** `gasp manifest init` creates and commits a default
+`preamble.md` in the manifest repo. Uncomment the `[context]` block
+in the generated `workspace.toml` (which already mentions
+`preamble = "preamble.md"`) to opt in.
 
-To use a custom template, set `[context].template = "path/to/your.j2"`
-(relative to the workspace root). The built-in template is the default
-when this field is unset.
+**Per-repo overrides.** `context_include` / `context_skills_include`
+on each `[[repos]]` entry override the workspace-level globs (use `""`
+to opt a repo out).
+
+**Schedule.** `gasp sync` runs context aggregation automatically after
+a successful repo sync; pass `--no-update-context` to skip. `gasp
+context sync` runs it on demand.
 
 ## Branches and worktrees
 
@@ -326,8 +337,13 @@ than failing on `git pull`).
 
 ```
 my-project/
-├── .workspace/         ← gasp's metadata + the manifest repo
-├── CLAUDE.md           ← aggregated agent instructions (if [context] is set)
+├── .workspace/
+│   ├── manifest/        ← cloned-mode manifest repo
+│   │   ├── workspace.toml
+│   │   ├── preamble.md  ← user-edited; gets prepended to CLAUDE.md
+│   │   └── README.md
+│   └── lock
+├── CLAUDE.md           ← generated workspace map (if [context] is set)
 ├── .claude/skills/     ← symlinks to per-repo skill files
 ├── backend/            ← cloned per [[repos]]
 │   ├── CLAUDE.md        ← per-repo instructions (source of truth)

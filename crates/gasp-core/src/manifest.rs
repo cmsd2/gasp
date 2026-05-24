@@ -54,6 +54,11 @@ pub struct ContextConfig {
     /// Optional path (relative to the workspace root) to a custom
     /// minijinja template. Default: built-in template.
     pub template: Option<PathBuf>,
+    /// Optional path (relative to the workspace root) to a file whose
+    /// contents are injected at the top of the generated output. Lets
+    /// users add cross-cutting instructions that survive every
+    /// regeneration without needing fence markers.
+    pub preamble: Option<PathBuf>,
 }
 
 impl ContextConfig {

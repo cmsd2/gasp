@@ -14,6 +14,12 @@ use crate::workspace::{MANIFEST_FILE, ManifestMode, Workspace};
 
 const WORKSPACE_TOML_TEMPLATE: &str = include_str!("../templates/workspace.toml.j2");
 const README_TEMPLATE: &str = include_str!("../templates/manifest_readme.md.j2");
+const PREAMBLE_TEMPLATE: &str = include_str!("../templates/preamble.md.j2");
+
+/// Filename of the bootstrapped preamble file inside the manifest
+/// repo. Referenced from the workspace.toml template as
+/// `[context].preamble`.
+pub const PREAMBLE_FILE: &str = "preamble.md";
 
 pub struct InitOpts<'a> {
     /// Display name for the README template. Defaults to the workspace
@@ -70,6 +76,11 @@ pub fn init(workspace: &Workspace, opts: &InitOpts<'_>) -> Result<InitOutcome> {
     };
 
     let readme = render_readme(&name, &repos)?;
+    let preamble = render_template(
+        "preamble",
+        PREAMBLE_TEMPLATE,
+        context! { name => name.clone() },
+    )?;
 
     // Move workspace.toml into the new repo dir.
     let manifest_repo = workspace.manifest_repo_dir();
@@ -92,9 +103,19 @@ pub fn init(workspace: &Workspace, opts: &InitOpts<'_>) -> Result<InitOutcome> {
         source,
     })?;
 
-    // Initialize the git repo, commit both files.
+    let preamble_path = manifest_repo.join(PREAMBLE_FILE);
+    std::fs::write(&preamble_path, preamble).map_err(|source| Error::Io {
+        operation: "write preamble".into(),
+        path: preamble_path.clone(),
+        source,
+    })?;
+
+    // Initialize the git repo, commit the three bootstrap files.
     run_git_in(&manifest_repo, &["init", "-q", "-b", "main"])?;
-    run_git_in(&manifest_repo, &["add", "workspace.toml", "README.md"])?;
+    run_git_in(
+        &manifest_repo,
+        &["add", "workspace.toml", "README.md", PREAMBLE_FILE],
+    )?;
     run_git_in(
         &manifest_repo,
         &["commit", "-q", "-m", "initial gasp manifest"],

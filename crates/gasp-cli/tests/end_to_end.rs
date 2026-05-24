@@ -1081,6 +1081,25 @@ fn manifest_init_bootstraps_from_empty_directory() {
         std::fs::read_to_string(f.workspace.join(".workspace/manifest/README.md")).unwrap();
     assert!(readme.contains("fresh"));
 
+    // Preamble.md is bootstrapped alongside, mentioning the workspace
+    // name, and committed in the same initial commit.
+    let preamble_path = f.workspace.join(".workspace/manifest/preamble.md");
+    assert!(preamble_path.is_file());
+    let preamble = std::fs::read_to_string(&preamble_path).unwrap();
+    assert!(preamble.contains("fresh"));
+    let ls_files = Command::new("git")
+        .args([
+            "-C",
+            f.workspace.join(".workspace/manifest").to_str().unwrap(),
+            "ls-files",
+        ])
+        .output()
+        .unwrap();
+    let tracked = String::from_utf8_lossy(&ls_files.stdout);
+    assert!(tracked.contains("preamble.md"), "{tracked}");
+    assert!(tracked.contains("workspace.toml"), "{tracked}");
+    assert!(tracked.contains("README.md"), "{tracked}");
+
     // Downstream commands work on the new workspace.
     let out = f.gasp(&["list"]);
     assert!(out.status.success());
@@ -1424,15 +1443,20 @@ kind = "skills"
     assert!(s.contains("2 files from 2 repos"), "{s}");
     assert!(s.contains("2 skills linked"), "{s}");
 
-    // Aggregated file has marker and per-repo content.
+    // Aggregated file is a workspace-level map: grouped layout and
+    // see-X references — but not per-repo CLAUDE.md content (agents
+    // pick that up on their own when working inside).
     let body = std::fs::read_to_string(f.workspace.join("CLAUDE.md")).unwrap();
-    assert!(body.contains("BEGIN gasp:context"));
-    assert!(body.contains("END gasp:context"));
-    assert!(body.contains("# Backend"));
-    assert!(body.contains("# Tools"));
+    assert!(body.contains("`backend/`"));
+    assert!(body.contains("`tools/`"));
+    assert!(body.contains("backend/CLAUDE.md"));
+    assert!(body.contains("tools/CLAUDE.md"));
     // Repos grouped by kind.
     assert!(body.contains("### Code"));
     assert!(body.contains("### Skills"));
+    // No verbatim per-repo content.
+    assert!(!body.contains("Pytest for tests"));
+    assert!(!body.contains("Vendored helpers"));
 
     // Symlinks created.
     assert!(
@@ -1450,29 +1474,29 @@ kind = "skills"
 }
 
 #[test]
-fn context_sync_preserves_user_content_outside_managed_block() {
+fn context_sync_renders_preamble_at_top() {
     let f = Fixture::new();
-    let r = make_bare_repo_with_files(f._root.path(), "alpha", &[("CLAUDE.md", "managed\n")]);
+    let r = make_bare_repo_with_files(f._root.path(), "alpha", &[("CLAUDE.md", "x\n")]);
     let seed = f.write_manifest(&format!(
-        "version = 1\n[context]\n[[repos]]\nname = \"alpha\"\nurl = \"{}\"\n",
+        "version = 1\n[context]\npreamble = \"preamble.md\"\n\
+         [[repos]]\nname = \"alpha\"\nurl = \"{}\"\n",
         r.display()
     ));
     assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
-    assert!(f.gasp(&["sync"]).status.success());
 
-    // Inject custom content above the BEGIN marker.
-    let body = std::fs::read_to_string(f.workspace.join("CLAUDE.md")).unwrap();
+    // Loose-mode manifest dir is `.workspace/`; preamble lives there.
     std::fs::write(
-        f.workspace.join("CLAUDE.md"),
-        format!("# My preface\n\nKeep me.\n\n{body}\n# Footer\n"),
+        f.workspace.join(".workspace").join("preamble.md"),
+        "## House rules\n\nUse pytest.\n",
     )
     .unwrap();
+    assert!(f.gasp(&["sync"]).status.success());
 
-    assert!(f.gasp(&["context", "sync"]).status.success());
     let body = std::fs::read_to_string(f.workspace.join("CLAUDE.md")).unwrap();
-    assert!(body.contains("# My preface"));
-    assert!(body.contains("# Footer"));
-    assert_eq!(body.matches("BEGIN gasp:context").count(), 1);
+    assert!(body.contains("House rules"));
+    assert!(body.contains("Use pytest"));
+    // The map still renders below the preamble.
+    assert!(body.contains("`alpha/`"));
 }
 
 #[test]

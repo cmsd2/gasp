@@ -1,0 +1,26 @@
+{# Default preamble written into the manifest repo by
+   `gasp manifest init`. Variables:
+     name (str) — workspace display name. #}
+# {{ name }} workspace — agent preamble
+
+This text is prepended to the workspace's aggregated agent context
+file by `gasp context sync`. Edit it with workspace-level instructions
+that should always be in scope.
+
+Things worth putting here:
+
+- Conventions that span multiple repos (style, testing approach,
+  release process).
+- Pointers to where canonical decisions live (e.g. "ADRs are in
+  `architecture/`; check there before proposing a new approach").
+- House rules for agents (what to ask vs. just do, how to format
+  commits, etc.).
+
+Things that belong in per-repo `CLAUDE.md` files instead:
+
+- Repo-specific tooling, build commands, and code conventions —
+  agents pick those up automatically when working inside the repo.
+
+This file lives in the manifest repo and is version-controlled
+alongside `workspace.toml`. Edit it freely; `gasp context sync`
+never overwrites it.

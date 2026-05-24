@@ -19,14 +19,6 @@ use crate::workspace::Workspace;
 
 const DEFAULT_TEMPLATE: &str = include_str!("../templates/context.md.j2");
 
-/// HTML-comment markers that fence the gasp-managed section of the
-/// output file. Markdown renderers treat them as comments, so they're
-/// invisible in rendered output but easy to find in source. The user
-/// can put anything they want above the BEGIN or below the END marker;
-/// `gasp context sync` only touches the bytes between them.
-const BEGIN_MARKER: &str = "<!-- BEGIN gasp:context — do not edit -->";
-const END_MARKER: &str = "<!-- END gasp:context -->";
-
 /// Summary of a context-sync run; primarily for CLI display.
 #[derive(Debug, Default)]
 pub struct SyncReport {
@@ -210,9 +202,15 @@ fn write_instructions(
     collected: &Collected,
     output_path: &Path,
 ) -> Result<()> {
+    let manifest_dir = workspace
+        .manifest_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.root().to_path_buf());
+
     let template_src: String = match cfg.template.as_deref() {
         Some(rel) => {
-            let abs = workspace.root().join(rel);
+            let abs = manifest_dir.join(rel);
             std::fs::read_to_string(&abs).map_err(|source| Error::Io {
                 operation: "read context template".into(),
                 path: abs,
@@ -228,6 +226,22 @@ fn write_instructions(
         .and_then(|s| s.to_str())
         .unwrap_or("workspace")
         .to_string();
+
+    // Resolve preamble relative to the manifest dir. In Cloned mode
+    // that's `.workspace/manifest/`, so the preamble lives in the
+    // same git repo as the manifest and travels with it. In Loose
+    // mode it's `.workspace/`.
+    let preamble: Option<String> = match cfg.preamble.as_deref() {
+        Some(rel) => {
+            let abs = manifest_dir.join(rel);
+            Some(std::fs::read_to_string(&abs).map_err(|source| Error::Io {
+                operation: "read context preamble".into(),
+                path: abs,
+                source,
+            })?)
+        }
+        None => None,
+    };
 
     let skill_names: Vec<&str> = collected.skills.iter().map(|s| s.name.as_str()).collect();
 
@@ -258,6 +272,7 @@ fn write_instructions(
             skills => skill_names,
             repos => &collected.repos,
             groups => groups,
+            preamble => preamble,
         })
         .map_err(|e| Error::Template(e.to_string()))?;
 
@@ -271,66 +286,15 @@ fn write_instructions(
         })?;
     }
 
-    let final_text = splice_into_existing(output_path, &rendered)?;
-    std::fs::write(output_path, final_text).map_err(|source| Error::Io {
+    // Full overwrite — `gasp` fully owns the output file. Users who
+    // need to inject their own text set `[context].preamble` to point
+    // at a file whose contents are rendered at the top.
+    std::fs::write(output_path, rendered).map_err(|source| Error::Io {
         operation: "write context output".into(),
         path: output_path.to_path_buf(),
         source,
     })?;
     Ok(())
-}
-
-/// Splice freshly-rendered content into the existing output file
-/// between BEGIN/END markers, preserving anything above the BEGIN or
-/// below the END. If the file doesn't exist (or doesn't have a marker
-/// pair), the result is just the markers wrapping the new content,
-/// appended to any pre-existing text.
-fn splice_into_existing(output_path: &Path, rendered: &str) -> Result<String> {
-    let managed = format!(
-        "{begin}\n{body}\n{end}\n",
-        begin = BEGIN_MARKER,
-        body = rendered.trim_end(),
-        end = END_MARKER,
-    );
-
-    let existing = match std::fs::read_to_string(output_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(managed),
-        Err(source) => {
-            return Err(Error::Io {
-                operation: "read existing context output".into(),
-                path: output_path.to_path_buf(),
-                source,
-            });
-        }
-    };
-
-    let (Some(begin), Some(end)) = (existing.find(BEGIN_MARKER), existing.find(END_MARKER)) else {
-        // No marker pair. Append a managed block to whatever's already
-        // there, separated by a blank line.
-        let sep = if existing.is_empty() || existing.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        return Ok(format!("{existing}{sep}\n{managed}"));
-    };
-
-    if end < begin {
-        // Markers out of order; treat as malformed and append.
-        return Ok(format!("{existing}\n\n{managed}"));
-    }
-
-    let end_inclusive = end + END_MARKER.len();
-    let mut after = &existing[end_inclusive..];
-    // Eat exactly one trailing newline so we don't accumulate blanks.
-    if let Some(rest) = after.strip_prefix('\n') {
-        after = rest;
-    }
-    Ok(format!(
-        "{before}{managed}{after}",
-        before = &existing[..begin]
-    ))
 }
 
 /// Symlink each collected skill into `skills_dir`. Existing symlinks
@@ -460,11 +424,20 @@ kind = "skills"
         assert_eq!(report.skills_linked, 2);
 
         let claude = std::fs::read_to_string(ws.root().join("CLAUDE.md")).unwrap();
-        assert!(claude.contains("Backend"));
-        assert!(claude.contains("Use pytest for tests"));
-        assert!(claude.contains("Tools"));
+        // Default template is a *map*: layout + see-X references, no
+        // per-repo content concatenation.
+        assert!(claude.contains("`backend/`"));
+        assert!(claude.contains("`tools/`"));
+        assert!(claude.contains("### Code"));
+        assert!(claude.contains("### Skills"));
+        assert!(claude.contains("backend/CLAUDE.md"));
+        assert!(claude.contains("tools/CLAUDE.md"));
+        // Skill symlinks listed.
         assert!(claude.contains("`lint.md`"));
         assert!(claude.contains("`format.md`"));
+        // Per-repo CLAUDE.md content is NOT inlined.
+        assert!(!claude.contains("Use pytest for tests"));
+        assert!(!claude.contains("Vendored helpers"));
 
         // Skills are symlinks pointing back at source files.
         let lint_link = ws.root().join(".claude/skills/lint.md");
@@ -475,38 +448,36 @@ kind = "skills"
     }
 
     #[test]
-    fn preserves_user_content_outside_markers() {
+    fn preamble_file_is_prepended_to_output() {
         let (_d, ws) = fixture_workspace_with(
             r#"
 version = 1
 [context]
+preamble = "preamble.md"
 [[repos]]
 name = "a"
 url  = "acme/a"
 "#,
         );
-        populate_repo(ws.root(), "a", &[("CLAUDE.md", "# A\n")]);
+        populate_repo(ws.root(), "a", &[("CLAUDE.md", "ignored by default\n")]);
 
-        // Pre-populate the output file with custom content that should
-        // survive the sync.
+        // The preamble lives next to the manifest (loose mode: `.workspace/`).
         std::fs::write(
-            ws.root().join("CLAUDE.md"),
-            "# My handwritten preamble\n\nKeep this around.\n",
+            ws.dot_dir().join("preamble.md"),
+            "# House rules\n\nUse pytest. ADRs in architecture/.\n",
         )
         .unwrap();
 
         sync(&ws).unwrap();
-
         let body = std::fs::read_to_string(ws.root().join("CLAUDE.md")).unwrap();
-        assert!(body.contains("My handwritten preamble"));
-        assert!(body.contains("Keep this around"));
-        assert!(body.contains("BEGIN gasp:context"));
-        assert!(body.contains("END gasp:context"));
-        assert!(body.contains("# A"));
+        assert!(body.contains("House rules"));
+        assert!(body.contains("Use pytest"));
+        // Layout still renders below the preamble.
+        assert!(body.contains("`a/`"));
     }
 
     #[test]
-    fn second_run_replaces_only_managed_block() {
+    fn second_run_overwrites_output_fully() {
         let (_d, ws) = fixture_workspace_with(
             r#"
 version = 1
@@ -516,25 +487,20 @@ name = "a"
 url  = "acme/a"
 "#,
         );
-        populate_repo(ws.root(), "a", &[("CLAUDE.md", "version one\n")]);
+        populate_repo(ws.root(), "a", &[(".claude/skills/foo.md", "foo\n")]);
         sync(&ws).unwrap();
 
-        // Add user content above and below the managed block.
-        let body = std::fs::read_to_string(ws.root().join("CLAUDE.md")).unwrap();
-        let injected = format!("# Top\n\n{body}\n# Bottom\n");
-        std::fs::write(ws.root().join("CLAUDE.md"), &injected).unwrap();
-
-        // Change the source content.
-        std::fs::write(ws.root().join("a/CLAUDE.md"), "version two\n").unwrap();
+        // Add a new skill — the regenerated file should include it
+        // and contain only the freshly-rendered content (no markers,
+        // no remnant of the previous output).
+        std::fs::write(ws.root().join("a/.claude/skills/bar.md"), "bar\n").unwrap();
         sync(&ws).unwrap();
 
         let final_body = std::fs::read_to_string(ws.root().join("CLAUDE.md")).unwrap();
-        assert!(final_body.starts_with("# Top\n"));
-        assert!(final_body.contains("version two"));
-        assert!(!final_body.contains("version one"));
-        assert!(final_body.contains("# Bottom"));
-        // Only one BEGIN marker (no duplicate managed blocks).
-        assert_eq!(final_body.matches("BEGIN gasp:context").count(), 1);
+        assert!(final_body.contains("`bar.md`"), "new skill appeared");
+        assert!(final_body.contains("`foo.md`"), "existing skill remained");
+        // No splice markers any more — output is single-managed.
+        assert!(!final_body.contains("BEGIN gasp:context"));
     }
 
     #[test]
@@ -592,8 +558,10 @@ name = "a"
 url  = "acme/a"
 "#,
         );
+        // Template lives in the same directory as the manifest (loose
+        // mode: `.workspace/`).
         std::fs::write(
-            ws.root().join("tpl.j2"),
+            ws.dot_dir().join("tpl.j2"),
             "MARKER {{ workspace_name }} repos:{{ repos|length }}\n",
         )
         .unwrap();
@@ -601,11 +569,10 @@ url  = "acme/a"
 
         sync(&ws).unwrap();
         let out = std::fs::read_to_string(ws.root().join("CLAUDE.md")).unwrap();
-        // The marker pair wraps the rendered content; the custom
-        // template appears inside.
-        assert!(out.contains("BEGIN gasp:context"));
-        assert!(out.contains("MARKER"));
+        // Custom template is the entire output — no wrapping markers.
+        assert!(out.starts_with("MARKER"));
         assert!(out.contains("repos:1"));
+        assert!(!out.contains("BEGIN gasp:context"));
     }
 
     #[test]
@@ -649,9 +616,15 @@ context_skills_include = ""                # opt out of skills
         assert_eq!(report.skills_linked, 1);
 
         let body = std::fs::read_to_string(ws.root().join("CLAUDE.md")).unwrap();
-        assert!(body.contains("from a"));
-        assert!(body.contains("from b custom"));
-        assert!(!body.contains("should be ignored"));
+        // The map references the actual matched file path for each repo;
+        // b's override picked up docs/AGENTS.md instead of CLAUDE.md.
+        assert!(body.contains("a/CLAUDE.md"), "{body}");
+        assert!(body.contains("b/docs/AGENTS.md"), "{body}");
+        assert!(
+            !body.contains("b/CLAUDE.md"),
+            "b's CLAUDE.md was overridden out"
+        );
+        // Skill opt-out worked.
         assert!(!ws.root().join(".claude/skills/b-skill.md").exists());
         assert!(ws.root().join(".claude/skills/a-skill.md").exists());
     }
