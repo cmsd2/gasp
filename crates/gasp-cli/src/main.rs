@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use gasp_core::Workspace;
 
 #[derive(Parser)]
 #[command(name = "gasp", version, about = "Multi-repo workspace manager")]
@@ -92,16 +93,72 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Init { .. } => not_implemented("init"),
+        Command::Init { manifest } => cmd_init(&manifest),
+        Command::List => cmd_list(),
         Command::Sync { .. } => not_implemented("sync"),
         Command::Status => not_implemented("status"),
-        Command::List => not_implemented("list"),
         Command::Foreach { .. } => not_implemented("foreach"),
         Command::Freeze { .. } => not_implemented("freeze"),
         Command::Add { .. } => not_implemented("add"),
         Command::Remove { .. } => not_implemented("remove"),
         Command::Doctor => not_implemented("doctor"),
     }
+}
+
+fn cmd_init(manifest: &std::path::Path) -> Result<()> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::init(&cwd, manifest)?;
+    println!("Initialized workspace at {}", ws.root().display());
+    Ok(())
+}
+
+fn cmd_list() -> Result<()> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    let manifest = ws.load_manifest()?;
+    let repos = manifest.resolve()?;
+
+    if repos.is_empty() {
+        println!("(no repos in manifest)");
+        return Ok(());
+    }
+
+    let name_w = repos.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
+    let path_w = repos
+        .iter()
+        .map(|r| r.path.display().to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let rev_w = repos
+        .iter()
+        .map(|r| r.revision.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+
+    println!(
+        "{:<nw$}  {:<rw$}  {:<pw$}  URL",
+        "NAME",
+        "REVISION",
+        "PATH",
+        nw = name_w,
+        rw = rev_w,
+        pw = path_w,
+    );
+    for r in &repos {
+        println!(
+            "{:<nw$}  {:<rw$}  {:<pw$}  {}",
+            r.name,
+            r.revision.as_deref().unwrap_or("-"),
+            r.path.display(),
+            r.url,
+            nw = name_w,
+            rw = rev_w,
+            pw = path_w,
+        );
+    }
+    Ok(())
 }
 
 fn not_implemented(cmd: &str) -> Result<()> {
