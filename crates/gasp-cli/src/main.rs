@@ -3,11 +3,12 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use gasp_core::edit::AddArgs;
 use gasp_core::lock::WorkspaceLock;
 use gasp_core::manifest::Repo;
 use gasp_core::status::{HeadCompare, RepoState, TargetState};
 use gasp_core::sync::{Action, ConflictMode};
-use gasp_core::{Workspace, status, sync};
+use gasp_core::{Workspace, edit, freeze, status, sync};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
@@ -88,6 +89,9 @@ enum Command {
 
     /// Run a shell command in every repo.
     Foreach {
+        /// Restrict to repos in the given group(s).
+        #[arg(long = "group", value_name = "GROUP")]
+        groups: Vec<String>,
         /// Command and arguments to run.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
@@ -146,11 +150,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
             jobs,
         } => cmd_sync(&groups, on_conflict.into(), jobs),
         Command::Status { strict } => cmd_status(strict),
-        Command::Foreach { .. } => not_implemented("foreach"),
-        Command::Freeze { .. } => not_implemented("freeze"),
-        Command::Add { .. } => not_implemented("add"),
-        Command::Remove { .. } => not_implemented("remove"),
-        Command::Doctor => not_implemented("doctor"),
+        Command::Foreach { groups, command } => cmd_foreach(&groups, &command),
+        Command::Freeze { output } => cmd_freeze(output.as_deref()).map(|()| ExitCode::SUCCESS),
+        Command::Add {
+            name,
+            url,
+            revision,
+            path,
+            groups,
+        } => cmd_add(&name, &url, revision.as_deref(), path.as_deref(), &groups)
+            .map(|()| ExitCode::SUCCESS),
+        Command::Remove { name } => cmd_remove(&name).map(|()| ExitCode::SUCCESS),
+        Command::Doctor => cmd_doctor(),
     }
 }
 
@@ -559,7 +570,240 @@ fn describe_action(action: &Action) -> (&'static str, String) {
     }
 }
 
-fn not_implemented(cmd: &str) -> Result<ExitCode> {
-    eprintln!("error: `{cmd}` is not implemented yet");
-    Ok(ExitCode::FAILURE)
+fn cmd_doctor() -> Result<ExitCode> {
+    let mut all_ok = true;
+
+    // 1. git is installed.
+    match std::process::Command::new("git").arg("--version").output() {
+        Ok(out) if out.status.success() => {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            println!("OK    {v}");
+        }
+        Ok(_) | Err(_) => {
+            println!("FAIL  git is not on PATH or failed to run");
+            all_ok = false;
+        }
+    }
+
+    // 2. Workspace-aware checks: per-host gh auth (github.com) or
+    // git ls-remote (everything else).
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    match Workspace::discover(&cwd) {
+        Ok(ws) => {
+            let manifest = ws.load_manifest()?;
+            let repos = manifest.resolve()?;
+            let host_to_url = collect_hosts_with_urls(&repos);
+
+            if host_to_url.is_empty() {
+                println!("OK    manifest has no remote hosts to check");
+            }
+
+            for (host, sample_url) in &host_to_url {
+                if host == "github.com" {
+                    all_ok &= check_gh_auth(host);
+                } else {
+                    all_ok &= check_ls_remote(host, sample_url);
+                }
+            }
+        }
+        Err(_) => {
+            println!("INFO  no workspace in scope; skipping per-host checks");
+            // Still try gh auth status overall, since it's commonly the
+            // thing users want to verify.
+            all_ok &= check_gh_auth_overall();
+        }
+    }
+
+    println!();
+    if all_ok {
+        println!("All checks passed.");
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("Some checks failed.");
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+fn collect_hosts_with_urls(repos: &[Repo]) -> Vec<(String, String)> {
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for r in repos {
+        if let Some(host) = gasp_core::url::host_of(&r.url) {
+            seen.entry(host).or_insert_with(|| r.url.clone());
+        }
+    }
+    seen.into_iter().collect()
+}
+
+fn check_gh_auth(hostname: &str) -> bool {
+    let out = std::process::Command::new("gh")
+        .args(["auth", "status", "--hostname", hostname])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            println!("OK    gh authenticated to {hostname}");
+            true
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            println!(
+                "FAIL  gh not authenticated to {hostname}: {}",
+                stderr.lines().next().unwrap_or("(no detail)")
+            );
+            false
+        }
+        Err(_) => {
+            println!("FAIL  gh CLI not installed (needed for {hostname})");
+            false
+        }
+    }
+}
+
+fn check_gh_auth_overall() -> bool {
+    let out = std::process::Command::new("gh")
+        .args(["auth", "status"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            println!("OK    gh CLI authenticated");
+            true
+        }
+        Ok(_) => {
+            println!("WARN  gh CLI present but no active auth");
+            true // not a hard failure outside a workspace
+        }
+        Err(_) => {
+            println!("WARN  gh CLI not installed");
+            true
+        }
+    }
+}
+
+fn check_ls_remote(host: &str, sample_url: &str) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["ls-remote", "--exit-code", sample_url, "HEAD"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            println!("OK    {host} reachable (probed {sample_url})");
+            true
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            println!(
+                "FAIL  {host} unreachable ({sample_url}): {}",
+                stderr.lines().next().unwrap_or("(no detail)")
+            );
+            false
+        }
+        Err(e) => {
+            println!("FAIL  could not spawn git ls-remote: {e}");
+            false
+        }
+    }
+}
+
+fn cmd_foreach(group_filter: &[String], command: &[String]) -> Result<ExitCode> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    let manifest = ws.load_manifest()?;
+    let mut repos = manifest.resolve()?;
+
+    if !group_filter.is_empty() {
+        repos.retain(|r| r.groups.iter().any(|g| group_filter.contains(g)));
+    }
+
+    if repos.is_empty() {
+        println!("(no repos match)");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let (program, args) = command
+        .split_first()
+        .expect("clap requires at least one arg");
+
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut missing = 0usize;
+
+    for repo in &repos {
+        let dest = ws.repo_path(&repo.path);
+        if !dest.exists() {
+            println!("=== {} (skipped: not cloned) ===", repo.name);
+            missing += 1;
+            continue;
+        }
+
+        println!("=== {} ===", repo.name);
+        let status = std::process::Command::new(program)
+            .args(args)
+            .current_dir(&dest)
+            .status();
+        match status {
+            Ok(s) if s.success() => succeeded += 1,
+            Ok(s) => {
+                eprintln!("    (exit {})", s.code().unwrap_or(-1));
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("    failed to spawn: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("Summary: {succeeded} succeeded, {failed} failed, {missing} missing");
+
+    if failed > 0 || missing > 0 {
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_add(
+    name: &str,
+    url: &str,
+    revision: Option<&str>,
+    path: Option<&std::path::Path>,
+    groups: &[String],
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    edit::add_repo(
+        &ws.manifest_path(),
+        &AddArgs {
+            name,
+            url,
+            revision,
+            path,
+            groups,
+        },
+    )?;
+    println!("Added '{name}' to manifest.");
+    Ok(())
+}
+
+fn cmd_remove(name: &str) -> Result<()> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    edit::remove_repo(&ws.manifest_path(), name)?;
+    println!("Removed '{name}' from manifest.");
+    Ok(())
+}
+
+fn cmd_freeze(output: Option<&std::path::Path>) -> Result<()> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    let body = freeze::freeze(&ws)?;
+
+    let default_path = ws.root().join("workspace.frozen.toml");
+    let target = output.unwrap_or(&default_path);
+
+    if target.exists() {
+        anyhow::bail!("refusing to overwrite existing file: {}", target.display());
+    }
+    std::fs::write(target, &body).with_context(|| format!("writing {}", target.display()))?;
+    println!("Wrote frozen manifest to {}", target.display());
+    Ok(())
 }

@@ -56,6 +56,46 @@ fn is_safe_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Extract the host from a normalized clone URL. Returns `None` for
+/// filesystem-path URLs (no host to talk to).
+pub fn host_of(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('/') || url.starts_with("./") || url.starts_with("../") {
+        return None;
+    }
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        let host_with_user = rest.split('/').next()?;
+        let host = host_with_user.rsplit('@').next()?;
+        let host = host.split(':').next()?;
+        return non_empty(host);
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let host_with_user = rest.split('/').next()?;
+        let host = host_with_user.rsplit('@').next()?;
+        let host = host.split(':').next()?;
+        return non_empty(host);
+    }
+    // SCP-style: user@host:path
+    if let Some(at) = url.find('@')
+        && let Some(rest) = url.get(at + 1..)
+        && let Some(colon) = rest.find(':')
+    {
+        return non_empty(&rest[..colon]);
+    }
+    None
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +174,45 @@ mod tests {
     fn relative_filesystem_path_passes_through() {
         assert_eq!(n("./local-repo"), "./local-repo");
         assert_eq!(n("../sibling"), "../sibling");
+    }
+
+    #[test]
+    fn host_of_https() {
+        assert_eq!(
+            host_of("https://github.com/acme/x.git").as_deref(),
+            Some("github.com")
+        );
+    }
+
+    #[test]
+    fn host_of_https_with_userinfo() {
+        assert_eq!(
+            host_of("https://user@gitlab.example.com/acme/x.git").as_deref(),
+            Some("gitlab.example.com")
+        );
+    }
+
+    #[test]
+    fn host_of_ssh_scheme() {
+        assert_eq!(
+            host_of("ssh://git@github.com/acme/x.git").as_deref(),
+            Some("github.com")
+        );
+    }
+
+    #[test]
+    fn host_of_ssh_scp_style() {
+        assert_eq!(
+            host_of("git@github.com:acme/x.git").as_deref(),
+            Some("github.com")
+        );
+    }
+
+    #[test]
+    fn host_of_filesystem_path_is_none() {
+        assert!(host_of("/tmp/repos/x.git").is_none());
+        assert!(host_of("./local").is_none());
+        assert!(host_of("../sibling").is_none());
     }
 
     #[test]

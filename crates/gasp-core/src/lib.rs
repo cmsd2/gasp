@@ -1,4 +1,6 @@
+pub mod edit;
 pub mod error;
+pub mod freeze;
 pub mod git;
 pub mod lock;
 pub mod manifest;

@@ -84,6 +84,18 @@ pub enum Error {
 
     #[error("workspace at {path} is locked by {holder}")]
     WorkspaceLocked { path: PathBuf, holder: String },
+
+    #[error("cannot freeze: repo '{name}' {reason} (run `gasp sync` first?)")]
+    FreezeUnavailable { name: String, reason: String },
+
+    #[error("cannot serialize manifest: {0}")]
+    ManifestSerialize(String),
+
+    #[error("repo '{0}' already exists in the manifest")]
+    RepoAlreadyExists(String),
+
+    #[error("repo '{0}' not found in the manifest")]
+    RepoNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

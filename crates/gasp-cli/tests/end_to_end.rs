@@ -697,6 +697,115 @@ revision = "main"
 }
 
 #[test]
+fn freeze_writes_pinned_manifest() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    let out = f.gasp(&["freeze"]);
+    assert!(out.status.success());
+    let frozen = std::fs::read_to_string(f.workspace.join("workspace.frozen.toml")).unwrap();
+    assert!(frozen.contains("[[repos]]"));
+    assert!(frozen.contains("revision = \""));
+    assert!(!frozen.contains("revision = \"main\""));
+
+    // Refuses to overwrite.
+    let out = f.gasp(&["freeze"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn add_then_remove_round_trips() {
+    let f = Fixture::new();
+    let seed = f.write_manifest("version = 1\n");
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+
+    let out = f.gasp(&["add", "alpha", "acme/alpha", "--revision", "main"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let manifest = std::fs::read_to_string(f.workspace.join(".workspace/workspace.toml")).unwrap();
+    assert!(manifest.contains("name = \"alpha\""));
+    assert!(manifest.contains("url = \"acme/alpha\""));
+
+    // Duplicate add fails.
+    let out = f.gasp(&["add", "alpha", "other/alpha"]);
+    assert!(!out.status.success());
+
+    // Remove succeeds.
+    let out = f.gasp(&["remove", "alpha"]);
+    assert!(out.status.success());
+    let manifest = std::fs::read_to_string(f.workspace.join(".workspace/workspace.toml")).unwrap();
+    assert!(!manifest.contains("alpha"));
+
+    // Remove missing fails.
+    let out = f.gasp(&["remove", "ghost"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn foreach_runs_command_per_repo() {
+    let f = Fixture::new();
+    let a = f.make_bare_repo("alpha");
+    let b = f.make_bare_repo("beta");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+[[repos]]
+name = "beta"
+url  = "{}"
+"#,
+        a.display(),
+        b.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // `git rev-parse HEAD` succeeds in both repos.
+    let out = f.gasp(&["foreach", "git", "rev-parse", "HEAD"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("=== alpha ==="));
+    assert!(s.contains("=== beta ==="));
+    assert!(s.contains("2 succeeded"));
+
+    // Failing command propagates non-zero exit.
+    let out = f.gasp(&["foreach", "false"]);
+    assert!(!out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("2 failed"), "{s}");
+}
+
+#[test]
+fn doctor_outside_workspace_passes_basic_checks() {
+    let f = Fixture::new();
+    let out = f.gasp(&["doctor"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("git version"));
+}
+
+#[test]
 fn sync_refuses_when_workspace_is_locked() {
     let f = Fixture::new();
     let bare = f.make_bare_repo("alpha");
