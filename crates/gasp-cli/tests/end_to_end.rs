@@ -93,53 +93,6 @@ fn stdout_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-#[test]
-fn new_writes_skeleton_to_default_path() {
-    let f = Fixture::new();
-    let out = f.gasp(&["new"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let manifest = f.workspace.join("workspace.toml");
-    assert!(manifest.is_file());
-    let body = std::fs::read_to_string(&manifest).unwrap();
-    assert!(body.contains("version = 1"));
-    assert!(body.contains("[defaults]"));
-}
-
-#[test]
-fn new_skeleton_is_a_valid_manifest_for_init() {
-    let f = Fixture::new();
-    assert!(f.gasp(&["new"]).status.success());
-    let out = f.gasp(&["init", "workspace.toml"]);
-    assert!(
-        out.status.success(),
-        "skeleton should be parseable: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn new_refuses_to_overwrite_existing_file() {
-    let f = Fixture::new();
-    std::fs::write(f.workspace.join("workspace.toml"), "already here\n").unwrap();
-    let out = f.gasp(&["new"]);
-    assert!(!out.status.success());
-    let body = std::fs::read_to_string(f.workspace.join("workspace.toml")).unwrap();
-    assert_eq!(body, "already here\n");
-}
-
-#[test]
-fn new_writes_to_explicit_path() {
-    let f = Fixture::new();
-    let dest = f.workspace.join("custom-name.toml");
-    let out = f.gasp(&["new", dest.to_str().unwrap()]);
-    assert!(out.status.success());
-    assert!(dest.is_file());
-}
-
 /// Build a bare git repo at `<root>/<name>.git` containing a single
 /// `workspace.toml` file with the given contents. Returns the bare repo
 /// path, suitable for use as a clone URL.
@@ -1100,6 +1053,38 @@ revision = "main"
     assert!(out.stdout.is_empty(), "stdout was: {:?}", out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("Wrote frozen manifest"), "{stderr}");
+}
+
+#[test]
+fn manifest_init_bootstraps_from_empty_directory() {
+    let f = Fixture::new();
+    // No `gasp init` first — workspace doesn't exist yet.
+    assert!(!f.workspace.join(".workspace").exists());
+
+    let out = f.gasp(&["manifest", "init", "--name", "fresh"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Cloned mode set up from scratch.
+    assert!(f.workspace.join(".workspace/manifest/.git").exists());
+    let manifest_path = f.workspace.join(".workspace/manifest/workspace.toml");
+    assert!(manifest_path.is_file());
+    let body = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(body.contains("version = 1"));
+    assert!(body.contains("[defaults]"));
+
+    // README mentions the chosen name.
+    let readme =
+        std::fs::read_to_string(f.workspace.join(".workspace/manifest/README.md")).unwrap();
+    assert!(readme.contains("fresh"));
+
+    // Downstream commands work on the new workspace.
+    let out = f.gasp(&["list"]);
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("(no repos in manifest)"));
 }
 
 #[test]

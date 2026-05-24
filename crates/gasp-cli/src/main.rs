@@ -48,12 +48,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write a skeleton workspace.toml ready to be filled in.
-    New {
-        /// Where to write the manifest. Defaults to ./workspace.toml.
-        path: Option<PathBuf>,
-    },
-
     /// Initialize a workspace from a manifest source.
     ///
     /// The source can be:
@@ -180,7 +174,6 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::New { path } => cmd_new(path.as_deref()).map(|()| ExitCode::SUCCESS),
         Command::Init { source } => cmd_init(&source).map(|()| ExitCode::SUCCESS),
         Command::List => cmd_list().map(|()| ExitCode::SUCCESS),
         Command::Sync {
@@ -212,52 +205,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         },
     }
-}
-
-const SKELETON: &str = r#"# gasp workspace manifest.
-# See https://github.com/cmsd2/gasp for documentation.
-
-version = 1
-
-# Defaults applied to every repo unless overridden.
-[defaults]
-revision = "main"
-remote   = "origin"
-host     = "github.com"
-
-# Example repo entries. Replace with your own:
-#
-# [[repos]]
-# name     = "frontend"
-# url      = "acme/frontend"          # owner/repo shorthand → defaults.host
-# revision = "main"                   # branch, tag, or sha
-# # path   = "services/frontend"      # default = repo name
-# # remote = "origin"                 # default = defaults.remote
-# # groups = ["web"]                  # for `gasp sync --group`
-#
-# [[repos]]
-# name = "shared-lib"
-# url  = "git@gitlab.example.com:platform/shared.git"
-"#;
-
-fn cmd_new(path: Option<&std::path::Path>) -> Result<()> {
-    let default = PathBuf::from("workspace.toml");
-    let target = path.unwrap_or(&default);
-
-    if target.exists() {
-        anyhow::bail!("refusing to overwrite existing file: {}", target.display());
-    }
-    if let Some(parent) = target.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        anyhow::bail!("parent directory does not exist: {}", parent.display());
-    }
-
-    std::fs::write(target, SKELETON).with_context(|| format!("writing {}", target.display()))?;
-    println!("Wrote skeleton manifest to {}", target.display());
-    println!("Next: edit it, then run `gasp init {}`.", target.display());
-    Ok(())
 }
 
 fn cmd_init(source: &str) -> Result<()> {
@@ -710,8 +657,25 @@ fn describe_action(action: &Action) -> (&'static str, String) {
 
 fn cmd_manifest_init(name: Option<&str>, remote: Option<&str>, push: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let ws = Workspace::discover(&cwd)?;
+    // Bootstrap path: if no workspace yet, create an empty .workspace/
+    // here so manifest_init can drop the default template into it.
+    let ws = match Workspace::discover(&cwd) {
+        Ok(ws) => ws,
+        Err(gasp_core::Error::WorkspaceNotFound(_)) => {
+            let dot = cwd.join(".workspace");
+            std::fs::create_dir_all(&dot).with_context(|| format!("creating {}", dot.display()))?;
+            eprintln!(
+                "No workspace found here — creating one at {}",
+                dot.display()
+            );
+            Workspace::discover(&cwd)?
+        }
+        Err(e) => return Err(e.into()),
+    };
     let outcome = manifest_init::init(&ws, &InitOpts { name, remote, push })?;
+    if outcome.bootstrapped {
+        println!("Wrote default workspace.toml template.");
+    }
     println!(
         "Created manifest repo at {}",
         outcome.manifest_repo.display()

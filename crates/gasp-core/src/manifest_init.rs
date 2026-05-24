@@ -12,6 +12,34 @@ use crate::error::{Error, Result};
 use crate::manifest::Manifest;
 use crate::workspace::{MANIFEST_FILE, ManifestMode, Workspace};
 
+/// Template used when no manifest is present yet. Bootstrapped on the
+/// first `gasp manifest init` in a fresh directory.
+const DEFAULT_LOOSE_MANIFEST: &str = r#"# gasp workspace manifest.
+# See https://github.com/cmsd2/gasp for documentation.
+
+version = 1
+
+# Defaults applied to every repo unless overridden.
+[defaults]
+revision = "main"
+remote   = "origin"
+host     = "github.com"
+
+# Example repo entries. Replace with your own:
+#
+# [[repos]]
+# name     = "frontend"
+# url      = "acme/frontend"          # owner/repo shorthand → defaults.host
+# revision = "main"                   # branch, tag, or sha
+# # path   = "services/frontend"      # default = repo name
+# # remote = "origin"                 # default = defaults.remote
+# # groups = ["web"]                  # for `gasp sync --group`
+#
+# [[repos]]
+# name = "shared-lib"
+# url  = "git@gitlab.example.com:platform/shared.git"
+"#;
+
 const README_TEMPLATE: &str = r#"# {{ name }} — gasp workspace
 
 This repository defines a [gasp](https://github.com/cmsd2/gasp) workspace
@@ -52,6 +80,9 @@ pub struct InitOutcome {
     pub manifest_repo: std::path::PathBuf,
     pub remote_set: bool,
     pub pushed: bool,
+    /// True if no manifest existed before this call — a default
+    /// template was written.
+    pub bootstrapped: bool,
 }
 
 pub fn init(workspace: &Workspace, opts: &InitOpts<'_>) -> Result<InitOutcome> {
@@ -60,8 +91,16 @@ pub fn init(workspace: &Workspace, opts: &InitOpts<'_>) -> Result<InitOutcome> {
     }
 
     let loose_manifest = workspace.dot_dir().join(MANIFEST_FILE);
-    if !loose_manifest.is_file() {
-        return Err(Error::ManifestNotFound(loose_manifest));
+
+    // Bootstrap: if no manifest exists, write the default template so
+    // the rest of this function can graduate it like any other manifest.
+    let bootstrapped = !loose_manifest.is_file();
+    if bootstrapped {
+        std::fs::write(&loose_manifest, DEFAULT_LOOSE_MANIFEST).map_err(|source| Error::Io {
+            operation: "write default workspace.toml".into(),
+            path: loose_manifest.clone(),
+            source,
+        })?;
     }
 
     // Validate (and resolve) the manifest before we touch anything on
@@ -125,6 +164,7 @@ pub fn init(workspace: &Workspace, opts: &InitOpts<'_>) -> Result<InitOutcome> {
         manifest_repo,
         remote_set,
         pushed,
+        bootstrapped,
     })
 }
 
@@ -209,6 +249,10 @@ mod tests {
         assert_eq!(ws.manifest_mode(), ManifestMode::Cloned);
         assert!(!outcome.remote_set);
         assert!(!outcome.pushed);
+        assert!(
+            !outcome.bootstrapped,
+            "loose manifest existed, no bootstrap"
+        );
 
         // README rendered with manifest data.
         let readme = std::fs::read_to_string(outcome.manifest_repo.join("README.md")).unwrap();
@@ -228,6 +272,35 @@ mod tests {
             .unwrap();
         let log = String::from_utf8_lossy(&log.stdout);
         assert!(log.contains("initial gasp manifest"), "{log}");
+    }
+
+    #[test]
+    fn bootstraps_default_manifest_when_none_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        // Build an empty .workspace/ so Workspace::discover succeeds.
+        std::fs::create_dir(dir.path().join(".workspace")).unwrap();
+        let ws = Workspace::discover(dir.path()).unwrap();
+
+        let outcome = init(
+            &ws,
+            &InitOpts {
+                name: Some("brand-new"),
+                remote: None,
+                push: false,
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.bootstrapped);
+        assert_eq!(ws.manifest_mode(), ManifestMode::Cloned);
+        // Default workspace.toml landed and parses.
+        let m = Manifest::load(&outcome.manifest_repo.join("workspace.toml")).unwrap();
+        assert_eq!(m.version, 1);
+        assert!(m.repos.is_empty(), "default template should have no repos");
+        // README mentions the name and the "(none yet)" hint.
+        let readme = std::fs::read_to_string(outcome.manifest_repo.join("README.md")).unwrap();
+        assert!(readme.contains("brand-new"));
+        assert!(readme.contains("none yet"), "{readme}");
     }
 
     #[test]
