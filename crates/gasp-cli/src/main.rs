@@ -1009,9 +1009,45 @@ fn cmd_add(
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
 
-    let url_owned = match url {
-        Some(u) => u.to_string(),
-        None => infer_url_from_disk(&ws, name, path)?,
+    let target_path = match path {
+        Some(p) => ws.repo_path(p),
+        None => ws.repo_path(std::path::Path::new(name)),
+    };
+    let inferred = infer_from_disk(&target_path)?;
+
+    let url_owned: String = match (url, inferred.url) {
+        (Some(u), _) => u.to_string(),
+        (None, Some(u)) => {
+            eprintln!("inferred url from {}: {u}", target_path.display());
+            u
+        }
+        (None, None) => {
+            if !target_path.is_dir() {
+                anyhow::bail!(
+                    "no URL provided and no clone at {} to infer from",
+                    target_path.display()
+                );
+            }
+            if !gasp_core::git::local::is_repo(&target_path) {
+                anyhow::bail!(
+                    "no URL provided and {} is not a git repository",
+                    target_path.display()
+                );
+            }
+            anyhow::bail!(
+                "no URL provided and {} has no 'origin' remote",
+                target_path.display()
+            );
+        }
+    };
+
+    let rev_owned: Option<String> = match (revision, inferred.revision) {
+        (Some(r), _) => Some(r.to_string()),
+        (None, Some(r)) => {
+            eprintln!("inferred revision from {}: {r}", target_path.display());
+            Some(r)
+        }
+        (None, None) => None,
     };
 
     edit::add_repo(
@@ -1019,7 +1055,7 @@ fn cmd_add(
         &AddArgs {
             name,
             url: &url_owned,
-            revision,
+            revision: rev_owned.as_deref(),
             path,
             groups,
             kind,
@@ -1029,38 +1065,25 @@ fn cmd_add(
     Ok(())
 }
 
-/// Look up the `origin` remote URL of an already-cloned repo so the
-/// user doesn't have to retype it. Errors with a clear message when
-/// nothing's cloned to read from.
-fn infer_url_from_disk(
-    ws: &Workspace,
-    name: &str,
-    path: Option<&std::path::Path>,
-) -> Result<String> {
-    let target_path = match path {
-        Some(p) => ws.repo_path(p),
-        None => ws.repo_path(std::path::Path::new(name)),
-    };
-    if !target_path.is_dir() {
-        anyhow::bail!(
-            "no URL provided and no clone at {} to infer from",
-            target_path.display()
-        );
+struct InferredFromDisk {
+    url: Option<String>,
+    revision: Option<String>,
+}
+
+/// Probe an on-disk repo for fields a user might not have typed
+/// explicitly. Returns `None`-everywhere if the path isn't a repo so
+/// the caller can decide whether the missing pieces are fatal.
+fn infer_from_disk(target_path: &std::path::Path) -> Result<InferredFromDisk> {
+    if !target_path.is_dir() || !gasp_core::git::local::is_repo(target_path) {
+        return Ok(InferredFromDisk {
+            url: None,
+            revision: None,
+        });
     }
-    if !gasp_core::git::local::is_repo(&target_path) {
-        anyhow::bail!(
-            "no URL provided and {} is not a git repository",
-            target_path.display()
-        );
-    }
-    let url = gasp_core::git::local::remote_url(&target_path, "origin")?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no URL provided and {} has no 'origin' remote",
-            target_path.display()
-        )
-    })?;
-    eprintln!("inferred url from {}: {url}", target_path.display());
-    Ok(url)
+    Ok(InferredFromDisk {
+        url: gasp_core::git::local::remote_url(target_path, "origin")?,
+        revision: gasp_core::git::local::current_branch(target_path)?,
+    })
 }
 
 fn cmd_remove(name: &str) -> Result<()> {
