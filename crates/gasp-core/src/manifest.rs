@@ -19,6 +19,12 @@ pub struct Manifest {
     pub defaults: Defaults,
     #[serde(default, rename = "repos")]
     pub repos: Vec<RepoSpec>,
+    /// Optional cross-repo "context" — aggregates per-repo agent
+    /// instructions into a single workspace-root file, and symlinks
+    /// skills into a workspace-local directory. Presence of this
+    /// section opts the workspace into context syncing; absence
+    /// means `gasp context sync` is a no-op.
+    pub context: Option<ContextConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -26,6 +32,49 @@ pub struct Defaults {
     pub revision: Option<String>,
     pub remote: Option<String>,
     pub host: Option<String>,
+}
+
+/// Configuration for cross-repo agent context aggregation. Every field
+/// is optional; the [`ContextConfig::with_defaults`] resolution applies
+/// sensible defaults.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ContextConfig {
+    /// Output path for the aggregated instructions file, relative to
+    /// the workspace root. Default: `CLAUDE.md`.
+    pub output: Option<PathBuf>,
+    /// Glob (relative to each repo root) matching instruction files to
+    /// include. Default: `CLAUDE.md`.
+    pub include: Option<String>,
+    /// Directory (relative to the workspace root) where skill symlinks
+    /// land. Default: `.claude/skills`.
+    pub skills_dir: Option<PathBuf>,
+    /// Glob (relative to each repo root) matching skill files to
+    /// symlink. Default: `.claude/skills/*.md`.
+    pub skills_include: Option<String>,
+    /// Optional path (relative to the workspace root) to a custom
+    /// minijinja template. Default: built-in template.
+    pub template: Option<PathBuf>,
+}
+
+impl ContextConfig {
+    pub fn output_or_default(&self) -> &Path {
+        self.output
+            .as_deref()
+            .unwrap_or_else(|| Path::new("CLAUDE.md"))
+    }
+    pub fn include_or_default(&self) -> &str {
+        self.include.as_deref().unwrap_or("CLAUDE.md")
+    }
+    pub fn skills_dir_or_default(&self) -> &Path {
+        self.skills_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new(".claude/skills"))
+    }
+    pub fn skills_include_or_default(&self) -> &str {
+        self.skills_include
+            .as_deref()
+            .unwrap_or(".claude/skills/*.md")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +86,17 @@ pub struct RepoSpec {
     pub remote: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Freeform classification (e.g. "code", "skills", "adrs", "data",
+    /// "docs"). Used by `gasp context sync` to group repos in the
+    /// generated agent-instructions file. No validation — convention is
+    /// project-local.
+    pub kind: Option<String>,
+    /// Per-repo override of the top-level `[context] include` glob.
+    /// `Some("")` opts the repo out of instruction aggregation.
+    pub context_include: Option<String>,
+    /// Per-repo override of the top-level `[context] skills_include`
+    /// glob. `Some("")` opts the repo out of skill linking.
+    pub context_skills_include: Option<String>,
 }
 
 /// A repo with all defaults applied. URL is the raw string from the
@@ -51,6 +111,12 @@ pub struct Repo {
     pub path: PathBuf,
     pub remote: String,
     pub groups: Vec<String>,
+    /// Freeform classification — see [`RepoSpec::kind`].
+    pub kind: Option<String>,
+    /// Per-repo override of `[context] include` — see [`RepoSpec::context_include`].
+    pub context_include: Option<String>,
+    /// Per-repo override of `[context] skills_include` — see [`RepoSpec::context_skills_include`].
+    pub context_skills_include: Option<String>,
 }
 
 impl Manifest {
@@ -133,6 +199,9 @@ impl Manifest {
                         .or_else(|| self.defaults.remote.clone())
                         .unwrap_or_else(|| DEFAULT_REMOTE.to_string()),
                     groups: spec.groups.clone(),
+                    kind: spec.kind.clone(),
+                    context_include: spec.context_include.clone(),
+                    context_skills_include: spec.context_skills_include.clone(),
                 })
             })
             .collect()
@@ -368,6 +437,69 @@ url  = "acme/lib"
 path = "services/lib"
 "#;
         parse(text).unwrap();
+    }
+
+    #[test]
+    fn context_section_parses_with_defaults() {
+        let text = r#"
+version = 1
+[context]
+"#;
+        let m = parse(text).unwrap();
+        let ctx = m.context.expect("section present");
+        // Empty section uses all defaults.
+        assert_eq!(ctx.output_or_default(), Path::new("CLAUDE.md"));
+        assert_eq!(ctx.include_or_default(), "CLAUDE.md");
+        assert_eq!(ctx.skills_dir_or_default(), Path::new(".claude/skills"));
+        assert_eq!(ctx.skills_include_or_default(), ".claude/skills/*.md");
+        assert!(ctx.template.is_none());
+    }
+
+    #[test]
+    fn context_section_overrides() {
+        let text = r#"
+version = 1
+[context]
+output = "AGENTS.md"
+include = "AGENTS.md"
+skills_dir = "agent-skills"
+skills_include = "skills/*.md"
+template = ".workspace/context.j2"
+"#;
+        let m = parse(text).unwrap();
+        let ctx = m.context.unwrap();
+        assert_eq!(ctx.output_or_default(), Path::new("AGENTS.md"));
+        assert_eq!(ctx.include_or_default(), "AGENTS.md");
+        assert_eq!(ctx.skills_dir_or_default(), Path::new("agent-skills"));
+        assert_eq!(ctx.skills_include_or_default(), "skills/*.md");
+        assert_eq!(
+            ctx.template.as_deref(),
+            Some(Path::new(".workspace/context.j2"))
+        );
+    }
+
+    #[test]
+    fn repo_kind_parses_when_set_and_defaults_to_none() {
+        let text = r#"
+version = 1
+[[repos]]
+name = "tools"
+url = "acme/tools"
+kind = "skills"
+[[repos]]
+name = "code"
+url = "acme/code"
+"#;
+        let m = parse(text).unwrap();
+        let repos = m.resolve().unwrap();
+        assert_eq!(repos[0].kind.as_deref(), Some("skills"));
+        assert_eq!(repos[1].kind, None);
+    }
+
+    #[test]
+    fn no_context_section_means_no_aggregation() {
+        let m = parse("version = 1\n").unwrap();
+        assert!(m.context.is_none());
     }
 
     #[test]

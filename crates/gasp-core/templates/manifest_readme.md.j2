@@ -1,0 +1,26 @@
+{# README written into a freshly-graduated manifest repo by
+   `gasp manifest init`. Variables: name (workspace name), repos
+   (list of {name, url, revision} entries from the manifest). #}
+# {{ name }} — gasp workspace
+
+This repository defines a [gasp](https://github.com/cmsd2/gasp) workspace
+that brings together {{ repos|length }} repositor{% if repos|length == 1 %}y{% else %}ies{% endif %}.
+
+## Usage
+
+```sh
+gasp init <this-repo-url>
+gasp sync
+```
+
+## Repositories
+
+{% if repos|length == 0 -%}
+*(none yet — add some with `gasp add` and commit.)*
+{% else -%}
+| Name | URL | Revision |
+| --- | --- | --- |
+{% for r in repos -%}
+| `{{ r.name }}` | `{{ r.url }}` | {% if r.revision %}`{{ r.revision }}`{% else %}—{% endif %} |
+{% endfor -%}
+{% endif %}

@@ -67,9 +67,10 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[error("git {operation} failed for {target}: {stderr}")]
+    #[error("git {operation} failed in {path} for {target}: {stderr}")]
     GitFailed {
         operation: String,
+        path: PathBuf,
         target: String,
         stderr: String,
     },
@@ -102,6 +103,13 @@ pub enum Error {
 
     #[error("template error: {0}")]
     Template(String),
+
+    #[error("skill name collision: '{name}' is provided by both {first} and {second}")]
+    ContextSkillCollision {
+        name: String,
+        first: PathBuf,
+        second: PathBuf,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

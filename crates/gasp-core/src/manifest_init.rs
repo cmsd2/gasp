@@ -12,58 +12,8 @@ use crate::error::{Error, Result};
 use crate::manifest::Manifest;
 use crate::workspace::{MANIFEST_FILE, ManifestMode, Workspace};
 
-/// Template used when no manifest is present yet. Bootstrapped on the
-/// first `gasp manifest init` in a fresh directory.
-const DEFAULT_LOOSE_MANIFEST: &str = r#"# gasp workspace manifest.
-# See https://github.com/cmsd2/gasp for documentation.
-
-version = 1
-
-# Defaults applied to every repo unless overridden.
-[defaults]
-revision = "main"
-remote   = "origin"
-host     = "github.com"
-
-# Example repo entries. Replace with your own:
-#
-# [[repos]]
-# name     = "frontend"
-# url      = "acme/frontend"          # owner/repo shorthand → defaults.host
-# revision = "main"                   # branch, tag, or sha
-# # path   = "services/frontend"      # default = repo name
-# # remote = "origin"                 # default = defaults.remote
-# # groups = ["web"]                  # for `gasp sync --group`
-#
-# [[repos]]
-# name = "shared-lib"
-# url  = "git@gitlab.example.com:platform/shared.git"
-"#;
-
-const README_TEMPLATE: &str = r#"# {{ name }} — gasp workspace
-
-This repository defines a [gasp](https://github.com/cmsd2/gasp) workspace
-that brings together {{ repos|length }} repositor{% if repos|length == 1 %}y{% else %}ies{% endif %}.
-
-## Usage
-
-```sh
-gasp init <this-repo-url>
-gasp sync
-```
-
-## Repositories
-
-{% if repos|length == 0 -%}
-*(none yet — add some with `gasp add` and commit.)*
-{% else -%}
-| Name | URL | Revision |
-| --- | --- | --- |
-{% for r in repos -%}
-| `{{ r.name }}` | `{{ r.url }}` | {% if r.revision %}`{{ r.revision }}`{% else %}—{% endif %} |
-{% endfor -%}
-{% endif %}
-"#;
+const WORKSPACE_TOML_TEMPLATE: &str = include_str!("../templates/workspace.toml.j2");
+const README_TEMPLATE: &str = include_str!("../templates/manifest_readme.md.j2");
 
 pub struct InitOpts<'a> {
     /// Display name for the README template. Defaults to the workspace
@@ -96,7 +46,8 @@ pub fn init(workspace: &Workspace, opts: &InitOpts<'_>) -> Result<InitOutcome> {
     // the rest of this function can graduate it like any other manifest.
     let bootstrapped = !loose_manifest.is_file();
     if bootstrapped {
-        std::fs::write(&loose_manifest, DEFAULT_LOOSE_MANIFEST).map_err(|source| Error::Io {
+        let body = render_template("workspace.toml", WORKSPACE_TOML_TEMPLATE, context! {})?;
+        std::fs::write(&loose_manifest, body).map_err(|source| Error::Io {
             operation: "write default workspace.toml".into(),
             path: loose_manifest.clone(),
             source,
@@ -183,14 +134,20 @@ fn render_readme(name: &str, repos: &[crate::manifest::Repo]) -> Result<String> 
             revision: r.revision.as_deref(),
         })
         .collect();
+    render_template(
+        "manifest_readme",
+        README_TEMPLATE,
+        context! { name, repos => ctx_repos },
+    )
+}
 
+fn render_template(name: &str, source: &str, ctx: minijinja::Value) -> Result<String> {
     let mut env = Environment::new();
-    env.add_template("README", README_TEMPLATE)
+    env.add_template(name, source)
         .map_err(|e| Error::Template(e.to_string()))?;
-    let tpl = env
-        .get_template("README")
-        .map_err(|e| Error::Template(e.to_string()))?;
-    tpl.render(context! { name, repos => ctx_repos })
+    env.get_template(name)
+        .map_err(|e| Error::Template(e.to_string()))?
+        .render(ctx)
         .map_err(|e| Error::Template(e.to_string()))
 }
 
@@ -204,6 +161,7 @@ fn run_git_in(repo: &Path, args: &[&str]) -> Result<()> {
     if !output.status.success() {
         return Err(Error::GitFailed {
             operation: format!("git {}", args.join(" ")),
+            path: repo.to_path_buf(),
             target: repo.display().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });

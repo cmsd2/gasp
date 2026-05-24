@@ -1,3 +1,4 @@
+pub mod context;
 pub mod edit;
 pub mod error;
 pub mod freeze;

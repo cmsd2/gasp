@@ -1217,6 +1217,170 @@ fn doctor_outside_workspace_passes_basic_checks() {
     assert!(s.contains("git version"));
 }
 
+/// Build a child bare repo whose working tree contains the given
+/// per-path `(rel_path, content)` pairs.
+fn make_bare_repo_with_files(root: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let src = root.join(format!("{name}-src"));
+    std::fs::create_dir_all(&src).unwrap();
+    run(&src, "git", &["init", "-q", "-b", "main", "."]);
+    for (rel, body) in files {
+        let p = src.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(p, body).unwrap();
+    }
+    run(&src, "git", &["add", "-A"]);
+    run(
+        &src,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    let bare = root.join(format!("{name}.git"));
+    run(
+        root,
+        "git",
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            src.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    bare
+}
+
+#[test]
+fn context_sync_aggregates_and_links_after_full_sync() {
+    let f = Fixture::new();
+    let backend = make_bare_repo_with_files(
+        f._root.path(),
+        "backend",
+        &[
+            ("CLAUDE.md", "# Backend\n\nPytest for tests.\n"),
+            (".claude/skills/be-lint.md", "lint skill\n"),
+        ],
+    );
+    let tools = make_bare_repo_with_files(
+        f._root.path(),
+        "tools",
+        &[
+            ("CLAUDE.md", "# Tools\n\nVendored helpers.\n"),
+            (".claude/skills/tools-format.md", "format skill\n"),
+        ],
+    );
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+
+[context]
+
+[[repos]]
+name = "backend"
+url  = "{}"
+revision = "main"
+kind = "code"
+
+[[repos]]
+name = "tools"
+url  = "{}"
+revision = "main"
+kind = "skills"
+"#,
+        backend.display(),
+        tools.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+
+    // sync should clone repos AND run context sync.
+    let out = f.gasp(&["sync"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("context: wrote"), "{s}");
+    assert!(s.contains("2 files from 2 repos"), "{s}");
+    assert!(s.contains("2 skills linked"), "{s}");
+
+    // Aggregated file has marker and per-repo content.
+    let body = std::fs::read_to_string(f.workspace.join("CLAUDE.md")).unwrap();
+    assert!(body.contains("BEGIN gasp:context"));
+    assert!(body.contains("END gasp:context"));
+    assert!(body.contains("# Backend"));
+    assert!(body.contains("# Tools"));
+    // Repos grouped by kind.
+    assert!(body.contains("### Code"));
+    assert!(body.contains("### Skills"));
+
+    // Symlinks created.
+    assert!(
+        std::fs::symlink_metadata(f.workspace.join(".claude/skills/be-lint.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        std::fs::symlink_metadata(f.workspace.join(".claude/skills/tools-format.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn context_sync_preserves_user_content_outside_managed_block() {
+    let f = Fixture::new();
+    let r = make_bare_repo_with_files(f._root.path(), "alpha", &[("CLAUDE.md", "managed\n")]);
+    let seed = f.write_manifest(&format!(
+        "version = 1\n[context]\n[[repos]]\nname = \"alpha\"\nurl = \"{}\"\n",
+        r.display()
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Inject custom content above the BEGIN marker.
+    let body = std::fs::read_to_string(f.workspace.join("CLAUDE.md")).unwrap();
+    std::fs::write(
+        f.workspace.join("CLAUDE.md"),
+        format!("# My preface\n\nKeep me.\n\n{body}\n# Footer\n"),
+    )
+    .unwrap();
+
+    assert!(f.gasp(&["context", "sync"]).status.success());
+    let body = std::fs::read_to_string(f.workspace.join("CLAUDE.md")).unwrap();
+    assert!(body.contains("# My preface"));
+    assert!(body.contains("# Footer"));
+    assert_eq!(body.matches("BEGIN gasp:context").count(), 1);
+}
+
+#[test]
+fn sync_no_update_context_skips_context_phase() {
+    let f = Fixture::new();
+    let r = make_bare_repo_with_files(f._root.path(), "alpha", &[("CLAUDE.md", "x\n")]);
+    let seed = f.write_manifest(&format!(
+        "version = 1\n[context]\n[[repos]]\nname = \"alpha\"\nurl = \"{}\"\n",
+        r.display()
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+
+    let out = f.gasp(&["sync", "--no-update-context"]);
+    assert!(out.status.success());
+    assert!(!stdout_of(&out).contains("context: wrote"));
+    assert!(!f.workspace.join("CLAUDE.md").exists());
+}
+
 #[test]
 fn sync_refuses_when_workspace_is_locked() {
     let f = Fixture::new();

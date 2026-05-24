@@ -1,0 +1,46 @@
+{# Default workspace.toml emitted by `gasp manifest init` when no
+   manifest exists yet. Pure-text today (no interpolation); kept as a
+   jinja template so future variables (e.g. {{ generator_version }})
+   can be added without refactoring. #}
+# gasp workspace manifest.
+# See https://github.com/cmsd2/gasp for documentation.
+
+version = 1
+
+# Defaults applied to every repo unless overridden.
+[defaults]
+revision = "main"
+remote   = "origin"
+host     = "github.com"
+
+# Optional: aggregate per-repo agent-instructions files into a single
+# workspace-root file, and symlink skills into a workspace-local dir.
+# Absence of this section makes `gasp context sync` a no-op. Uncomment
+# the section to opt in (everything below it has sensible defaults).
+#
+# [context]
+# output         = "CLAUDE.md"            # generated instructions file
+# include        = "CLAUDE.md"            # per-repo file(s) to aggregate
+# skills_dir     = ".claude/skills"       # where symlinks land
+# skills_include = ".claude/skills/*.md"  # per-repo skills to symlink
+# # template     = ".workspace/context.j2" # optional custom jinja template
+
+# Example repo entries. Replace with your own:
+#
+# [[repos]]
+# name     = "frontend"
+# url      = "acme/frontend"          # owner/repo shorthand → defaults.host
+# revision = "main"                   # branch, tag, or sha
+# kind     = "code"                   # code | skills | adrs | data | docs | ...
+# # path   = "services/frontend"      # default = repo name
+# # remote = "origin"                 # default = defaults.remote
+# # groups = ["web"]                  # for `gasp sync --group`
+#
+# [[repos]]
+# name = "architecture"
+# url  = "acme/architecture-decisions"
+# kind = "adrs"                       # ADR records for the agent to consult
+#
+# [[repos]]
+# name = "shared-lib"
+# url  = "git@gitlab.example.com:platform/shared.git"

@@ -19,10 +19,10 @@ pub fn clone(url: &str, dest: &Path, revision: Option<&str>) -> Result<()> {
 
     let mut cmd = Command::new("git");
     cmd.arg("clone").arg(url).arg(dest);
-    run_git(&mut cmd, "clone", url)?;
+    run_git(&mut cmd, "clone", url, dest)?;
 
     if let Some(rev) = revision {
-        run_git(&mut git_in(dest, ["checkout", rev]), "checkout", rev)?;
+        run_git(&mut git_in(dest, ["checkout", rev]), "checkout", rev, dest)?;
     }
     Ok(())
 }
@@ -35,6 +35,7 @@ pub fn fetch(repo: &Path, remote: &str) -> Result<()> {
         &mut git_in(repo, ["fetch", "--prune", remote]),
         "fetch",
         remote,
+        repo,
     )
 }
 
@@ -45,13 +46,14 @@ pub fn merge_ff_only(repo: &Path, target: &str) -> Result<()> {
         &mut git_in(repo, ["merge", "--ff-only", target]),
         "merge --ff-only",
         target,
+        repo,
     )
 }
 
 /// `git -C <repo> rebase <onto>`. Leaves the rebase in progress on
 /// conflict — git's own error message is surfaced.
 pub fn rebase(repo: &Path, onto: &str) -> Result<()> {
-    run_git(&mut git_in(repo, ["rebase", onto]), "rebase", onto)
+    run_git(&mut git_in(repo, ["rebase", onto]), "rebase", onto, repo)
 }
 
 /// `git -C <repo> reset --hard <target>`. Destroys local commits and
@@ -61,6 +63,7 @@ pub fn reset_hard(repo: &Path, target: &str) -> Result<()> {
         &mut git_in(repo, ["reset", "--hard", target]),
         "reset --hard",
         target,
+        repo,
     )
 }
 
@@ -71,6 +74,7 @@ pub fn pull_ff_only(repo: &Path) -> Result<()> {
         &mut git_in(repo, ["pull", "--ff-only"]),
         "pull --ff-only",
         "origin",
+        repo,
     )
 }
 
@@ -84,11 +88,12 @@ where
     cmd
 }
 
-fn run_git(cmd: &mut Command, operation: &str, target: &str) -> Result<()> {
+fn run_git(cmd: &mut Command, operation: &str, target: &str, repo: &Path) -> Result<()> {
     let output = cmd.output().map_err(|source| Error::GitSpawn { source })?;
     if !output.status.success() {
         return Err(Error::GitFailed {
             operation: operation.to_string(),
+            path: repo.to_path_buf(),
             target: target.to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });

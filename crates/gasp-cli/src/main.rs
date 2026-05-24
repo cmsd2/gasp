@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use gasp_core::context;
 use gasp_core::edit::AddArgs;
 use gasp_core::lock::WorkspaceLock;
 use gasp_core::manifest::Repo;
@@ -79,6 +80,9 @@ enum Command {
         /// Skip updating the cloned manifest repo before syncing.
         #[arg(long)]
         no_update_manifest: bool,
+        /// Skip running `context sync` after syncing.
+        #[arg(long)]
+        no_update_context: bool,
     },
 
     /// Show per-repo state vs the manifest.
@@ -141,6 +145,21 @@ enum Command {
         #[command(subcommand)]
         cmd: ManifestCmd,
     },
+
+    /// Manage cross-repo agent context (aggregated instructions and
+    /// symlinked skills).
+    Context {
+        #[command(subcommand)]
+        cmd: ContextCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextCmd {
+    /// Aggregate per-repo instructions files into the workspace-root
+    /// output, and refresh skill symlinks. No-op if the manifest has
+    /// no `[context]` section.
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -181,7 +200,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             groups,
             jobs,
             no_update_manifest,
-        } => cmd_sync(&groups, on_conflict.into(), jobs, !no_update_manifest),
+            no_update_context,
+        } => cmd_sync(
+            &groups,
+            on_conflict.into(),
+            jobs,
+            !no_update_manifest,
+            !no_update_context,
+        ),
         Command::Status {
             strict,
             show_manifest,
@@ -203,6 +229,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 cmd_manifest_init(name.as_deref(), remote.as_deref(), push)
                     .map(|()| ExitCode::SUCCESS)
             }
+        },
+        Command::Context { cmd } => match cmd {
+            ContextCmd::Sync => cmd_context_sync().map(|()| ExitCode::SUCCESS),
         },
     }
 }
@@ -454,12 +483,17 @@ fn cmd_sync(
     mode: ConflictMode,
     jobs: Option<usize>,
     update_manifest: bool,
+    update_context: bool,
 ) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
     let _lock = WorkspaceLock::acquire(&ws.dot_dir())?;
 
-    if update_manifest && let Some(outcome) = ws.update_manifest()? {
+    if update_manifest
+        && let Some(outcome) = ws
+            .update_manifest()
+            .context("updating the cloned manifest repo (use --no-update-manifest to skip)")?
+    {
         match outcome {
             ManifestUpdate::UpToDate { sha } => {
                 println!("manifest: up to date ({})", short_sha(&sha));
@@ -553,6 +587,14 @@ fn cmd_sync(
             }
         }
         return Ok(ExitCode::FAILURE);
+    }
+
+    // Refresh agent context after repos are up-to-date. Skips silently
+    // if the manifest has no [context] section, and only runs after a
+    // fully successful sync so it never operates on an inconsistent
+    // workspace.
+    if update_context {
+        run_context_sync(&ws).context("syncing agent context (use --no-update-context to skip)")?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -652,6 +694,34 @@ fn describe_action(action: &Action) -> (&'static str, String) {
         Action::Reset { to } => ("reset", format!("→ {}", short_sha(to))),
         Action::Rebase { onto } => ("rebase", format!("onto {}", short_sha(onto))),
         Action::Skip { reason } => ("skip", format!("({reason})")),
+    }
+}
+
+fn cmd_context_sync() -> Result<()> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    run_context_sync(&ws)
+}
+
+/// Shared between the explicit `gasp context sync` command and the
+/// auto-run at the end of `gasp sync`. Prints a one-line summary or
+/// silently no-ops when the manifest has no `[context]` section.
+fn run_context_sync(ws: &Workspace) -> Result<()> {
+    match context::sync(ws)? {
+        None => Ok(()),
+        Some(r) => {
+            println!(
+                "context: wrote {} ({} file{} from {} repo{}, {} skill{} linked)",
+                r.output_path.display(),
+                r.instructions_files,
+                if r.instructions_files == 1 { "" } else { "s" },
+                r.repos_contributing,
+                if r.repos_contributing == 1 { "" } else { "s" },
+                r.skills_linked,
+                if r.skills_linked == 1 { "" } else { "s" },
+            );
+            Ok(())
+        }
     }
 }
 
