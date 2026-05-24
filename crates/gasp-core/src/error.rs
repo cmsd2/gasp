@@ -40,14 +40,22 @@ pub enum Error {
         reason: String,
     },
 
+    #[error("repo '{name}' has invalid path '{path}': {reason}")]
+    InvalidRepoPath {
+        name: String,
+        path: String,
+        reason: String,
+    },
+
     #[error("not inside a gasp workspace (no .workspace/ directory found in any parent of {0})")]
     WorkspaceNotFound(PathBuf),
 
     #[error("workspace already initialized at {0}")]
     WorkspaceExists(PathBuf),
 
-    #[error("io error at {path}: {source}")]
+    #[error("io error during {operation} at {path}: {source}")]
     Io {
+        operation: String,
         path: PathBuf,
         #[source]
         source: std::io::Error,

@@ -405,6 +405,56 @@ url  = "{}"
 }
 
 #[test]
+fn status_strict_exits_zero_when_clean() {
+    let f = Fixture::new();
+    let a = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        a.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    let out = f.gasp(&["status", "--strict"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn status_strict_exits_nonzero_when_dirty() {
+    let f = Fixture::new();
+    let a = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        a.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+    std::fs::write(f.workspace.join("alpha").join("README.md"), "dirty\n").unwrap();
+
+    let out = f.gasp(&["status", "--strict"]);
+    assert!(!out.status.success());
+    // Without --strict, status is still informational and exits 0.
+    let out = f.gasp(&["status"]);
+    assert!(out.status.success());
+}
+
+#[test]
 fn status_reports_ahead_after_local_commit() {
     let f = Fixture::new();
     let a = f.make_bare_repo("alpha");
@@ -596,7 +646,7 @@ revision = "main"
     add_local_commit(&f.workspace.join("alpha"), "local", "x\n", "local");
     std::fs::write(f.workspace.join("alpha").join("README.md"), "dirty\n").unwrap();
 
-    let out = f.gasp(&["sync", "--reset"]);
+    let out = f.gasp(&["sync", "--on-conflict", "reset"]);
     assert!(
         out.status.success(),
         "{}",
@@ -633,7 +683,7 @@ revision = "main"
     let src = f._root.path().join("src").join("alpha");
     add_upstream_commit(&src, &bare, "x", "U\n");
 
-    let out = f.gasp(&["sync", "--rebase"]);
+    let out = f.gasp(&["sync", "--on-conflict", "rebase"]);
     assert!(
         out.status.success(),
         "{}",

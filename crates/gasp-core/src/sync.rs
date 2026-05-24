@@ -152,7 +152,6 @@ mod tests {
         RepoStatus {
             name: "r".into(),
             path: PathBuf::from("r"),
-            absolute_path: PathBuf::from("/tmp/r"),
             state: RepoState::Present(info),
         }
     }
@@ -178,7 +177,6 @@ mod tests {
         RepoStatus {
             name: "r".into(),
             path: PathBuf::from("r"),
-            absolute_path: PathBuf::from("/tmp/r"),
             state: RepoState::Missing,
         }
     }

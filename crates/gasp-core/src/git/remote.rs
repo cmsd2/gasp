@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
@@ -10,88 +11,67 @@ pub fn clone(url: &str, dest: &Path, revision: Option<&str>) -> Result<()> {
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+            operation: "create parent directory for clone".into(),
             path: parent.to_path_buf(),
             source,
         })?;
     }
 
-    run_git(
-        Command::new("git").arg("clone").arg(url).arg(dest),
-        "clone",
-        url,
-    )?;
+    let mut cmd = Command::new("git");
+    cmd.arg("clone").arg(url).arg(dest);
+    run_git(&mut cmd, "clone", url)?;
 
     if let Some(rev) = revision {
-        run_git(
-            Command::new("git")
-                .arg("-C")
-                .arg(dest)
-                .arg("checkout")
-                .arg(rev),
-            "checkout",
-            rev,
-        )?;
+        run_git(&mut git_in(dest, ["checkout", rev]), "checkout", rev)?;
     }
-
     Ok(())
 }
 
-/// `git -C <repo> fetch <remote>`.
+/// `git -C <repo> fetch --prune <remote>`. `--prune` removes stale
+/// remote-tracking branches so resolve_revision doesn't keep finding
+/// branches the upstream has deleted.
 pub fn fetch(repo: &Path, remote: &str) -> Result<()> {
     run_git(
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .arg("fetch")
-            .arg("--prune")
-            .arg(remote),
+        &mut git_in(repo, ["fetch", "--prune", remote]),
         "fetch",
         remote,
     )
 }
 
-/// `git -C <repo> merge --ff-only <target>`. Fails if the merge would not
-/// be a fast-forward.
+/// `git -C <repo> merge --ff-only <target>`. Fails if the merge would
+/// not be a fast-forward.
 pub fn merge_ff_only(repo: &Path, target: &str) -> Result<()> {
     run_git(
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .arg("merge")
-            .arg("--ff-only")
-            .arg(target),
+        &mut git_in(repo, ["merge", "--ff-only", target]),
         "merge --ff-only",
         target,
     )
 }
 
-/// `git -C <repo> rebase <onto>`. Falls back to leaving the rebase in
-/// progress on conflict — git's own error message is surfaced.
+/// `git -C <repo> rebase <onto>`. Leaves the rebase in progress on
+/// conflict — git's own error message is surfaced.
 pub fn rebase(repo: &Path, onto: &str) -> Result<()> {
-    run_git(
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .arg("rebase")
-            .arg(onto),
-        "rebase",
-        onto,
-    )
+    run_git(&mut git_in(repo, ["rebase", onto]), "rebase", onto)
 }
 
 /// `git -C <repo> reset --hard <target>`. Destroys local commits and
 /// working-tree changes.
 pub fn reset_hard(repo: &Path, target: &str) -> Result<()> {
     run_git(
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .arg("reset")
-            .arg("--hard")
-            .arg(target),
+        &mut git_in(repo, ["reset", "--hard", target]),
         "reset --hard",
         target,
     )
+}
+
+fn git_in<I, S>(repo: &Path, args: I) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).args(args);
+    cmd
 }
 
 fn run_git(cmd: &mut Command, operation: &str, target: &str) -> Result<()> {

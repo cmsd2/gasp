@@ -20,6 +20,7 @@ impl Workspace {
     /// `.workspace/` subdirectory.
     pub fn discover(start: &Path) -> Result<Self> {
         let start = start.canonicalize().map_err(|source| Error::Io {
+            operation: "canonicalize start path".into(),
             path: start.to_path_buf(),
             source,
         })?;
@@ -46,11 +47,13 @@ impl Workspace {
         let _ = Manifest::load(manifest_src)?;
 
         std::fs::create_dir_all(&dot).map_err(|source| Error::Io {
+            operation: "create .workspace directory".into(),
             path: dot.clone(),
             source,
         })?;
         let dest = dot.join(MANIFEST_FILE);
         std::fs::copy(manifest_src, &dest).map_err(|source| Error::Io {
+            operation: "copy manifest into .workspace".into(),
             path: dest.clone(),
             source,
         })?;

@@ -2,7 +2,7 @@
 //!
 //! These never touch the network; for that, see `git::remote`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use git2::{Repository, StatusOptions};
 
@@ -16,10 +16,12 @@ fn open(path: &Path) -> Result<Repository> {
     })
 }
 
-fn map_err<'a>(op: &'a str, path: &'a Path) -> impl FnOnce(git2::Error) -> Error + 'a {
+fn map_err(op: &str, path: &Path) -> impl FnOnce(git2::Error) -> Error {
+    let operation = op.to_string();
+    let path = path.to_path_buf();
     move |source| Error::LibGit {
-        operation: op.into(),
-        path: path.to_path_buf(),
+        operation,
+        path,
         source,
     }
 }
@@ -87,13 +89,6 @@ pub fn resolve_revision(path: &Path, revision: &str, remote: &str) -> Result<Opt
 /// True if the working tree at `path` looks like a git repository.
 pub fn is_repo(path: &Path) -> bool {
     Repository::open(path).is_ok()
-}
-
-/// Path to the `.git` directory of a repo, useful for diagnostics.
-#[allow(dead_code)]
-pub fn git_dir(path: &Path) -> Result<PathBuf> {
-    let repo = open(path)?;
-    Ok(repo.path().to_path_buf())
 }
 
 #[cfg(test)]

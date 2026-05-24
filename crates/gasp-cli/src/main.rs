@@ -2,10 +2,35 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use gasp_core::status::{HeadCompare, RepoState, TargetState};
 use gasp_core::sync::{Action, ConflictMode};
 use gasp_core::{Workspace, status, sync};
+
+mod table;
+use table::Table;
+
+/// CLI-side parallel to [`ConflictMode`] so we can derive `ValueEnum`
+/// without taking a clap dependency in `gasp-core`.
+#[derive(Clone, Copy, ValueEnum)]
+enum CliConflictMode {
+    /// Skip repos that can't be fast-forwarded (default).
+    Refuse,
+    /// Rebase local commits onto the target.
+    Rebase,
+    /// Hard-reset to the target. Destructive.
+    Reset,
+}
+
+impl From<CliConflictMode> for ConflictMode {
+    fn from(m: CliConflictMode) -> Self {
+        match m {
+            CliConflictMode::Refuse => ConflictMode::Refuse,
+            CliConflictMode::Rebase => ConflictMode::Rebase,
+            CliConflictMode::Reset => ConflictMode::Reset,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "gasp", version, about = "Multi-repo workspace manager")]
@@ -30,22 +55,26 @@ enum Command {
 
     /// Clone missing repos and update existing ones to match the manifest.
     Sync {
-        /// Refuse to modify repos that aren't fast-forwardable (default).
-        #[arg(long, conflicts_with_all = ["rebase", "reset"])]
-        refuse: bool,
-        /// Rebase local commits onto the target revision on conflict.
-        #[arg(long, conflicts_with_all = ["refuse", "reset"])]
-        rebase: bool,
-        /// Hard-reset to the target revision on conflict. Destructive.
-        #[arg(long, conflicts_with_all = ["refuse", "rebase"])]
-        reset: bool,
+        /// Behavior when an existing repo can't be fast-forwarded.
+        #[arg(
+            long = "on-conflict",
+            value_enum,
+            default_value_t = CliConflictMode::Refuse,
+            value_name = "MODE",
+        )]
+        on_conflict: CliConflictMode,
         /// Restrict to repos in the given group(s).
         #[arg(long = "group", value_name = "GROUP")]
         groups: Vec<String>,
     },
 
     /// Show per-repo state vs the manifest.
-    Status,
+    Status {
+        /// Exit non-zero if any repo is missing, dirty, or off-target.
+        /// Useful in CI.
+        #[arg(long)]
+        strict: bool,
+    },
 
     /// List repos in the manifest.
     List,
@@ -105,26 +134,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Init { manifest } => cmd_init(&manifest).map(|()| ExitCode::SUCCESS),
         Command::List => cmd_list().map(|()| ExitCode::SUCCESS),
         Command::Sync {
-            refuse: _,
-            rebase,
-            reset,
+            on_conflict,
             groups,
-        } => {
-            let mode = if reset {
-                ConflictMode::Reset
-            } else if rebase {
-                ConflictMode::Rebase
-            } else {
-                ConflictMode::Refuse
-            };
-            cmd_sync(&groups, mode)
-        }
-        Command::Status => cmd_status(),
-        Command::Foreach { .. } => not_implemented("foreach").map(|()| ExitCode::SUCCESS),
-        Command::Freeze { .. } => not_implemented("freeze").map(|()| ExitCode::SUCCESS),
-        Command::Add { .. } => not_implemented("add").map(|()| ExitCode::SUCCESS),
-        Command::Remove { .. } => not_implemented("remove").map(|()| ExitCode::SUCCESS),
-        Command::Doctor => not_implemented("doctor").map(|()| ExitCode::SUCCESS),
+        } => cmd_sync(&groups, on_conflict.into()),
+        Command::Status { strict } => cmd_status(strict),
+        Command::Foreach { .. } => not_implemented("foreach"),
+        Command::Freeze { .. } => not_implemented("freeze"),
+        Command::Add { .. } => not_implemented("add"),
+        Command::Remove { .. } => not_implemented("remove"),
+        Command::Doctor => not_implemented("doctor"),
     }
 }
 
@@ -192,45 +210,20 @@ fn cmd_list() -> Result<()> {
         return Ok(());
     }
 
-    let name_w = repos.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
-    let path_w = repos
-        .iter()
-        .map(|r| r.path.display().to_string().len())
-        .max()
-        .unwrap_or(0)
-        .max(4);
-    let rev_w = repos
-        .iter()
-        .map(|r| r.revision.as_deref().unwrap_or("-").len())
-        .max()
-        .unwrap_or(0)
-        .max(8);
-
-    println!(
-        "{:<nw$}  {:<rw$}  {:<pw$}  URL",
-        "NAME",
-        "REVISION",
-        "PATH",
-        nw = name_w,
-        rw = rev_w,
-        pw = path_w,
-    );
+    let mut t = Table::new(&["NAME", "REVISION", "PATH", "URL"]);
     for r in &repos {
-        println!(
-            "{:<nw$}  {:<rw$}  {:<pw$}  {}",
-            r.name,
-            r.revision.as_deref().unwrap_or("-"),
-            r.path.display(),
-            r.url,
-            nw = name_w,
-            rw = rev_w,
-            pw = path_w,
-        );
+        t.row([
+            r.name.clone(),
+            r.revision.clone().unwrap_or_else(|| "-".into()),
+            r.path.display().to_string(),
+            r.url.clone(),
+        ]);
     }
+    t.print();
     Ok(())
 }
 
-fn cmd_status() -> Result<ExitCode> {
+fn cmd_status(strict: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
     let manifest = ws.load_manifest()?;
@@ -249,40 +242,20 @@ fn cmd_status() -> Result<ExitCode> {
         })
         .collect::<Result<_>>()?;
 
-    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
-    let state_w = rows.iter().map(|r| r.state.len()).max().unwrap_or(0).max(5);
-    let head_w = rows.iter().map(|r| r.head.len()).max().unwrap_or(0).max(7);
-    let branch_w = rows
-        .iter()
-        .map(|r| r.branch.len())
-        .max()
-        .unwrap_or(0)
-        .max(6);
-
-    println!(
-        "{:<nw$}  {:<sw$}  {:<hw$}  {:<bw$}  DETAIL",
-        "NAME",
-        "STATE",
-        "HEAD",
-        "BRANCH",
-        nw = name_w,
-        sw = state_w,
-        hw = head_w,
-        bw = branch_w,
-    );
+    let mut t = Table::new(&["NAME", "STATE", "HEAD", "BRANCH", "DETAIL"]);
     for r in &rows {
-        println!(
-            "{:<nw$}  {:<sw$}  {:<hw$}  {:<bw$}  {}",
-            r.name,
-            r.state,
-            r.head,
-            r.branch,
-            r.detail,
-            nw = name_w,
-            sw = state_w,
-            hw = head_w,
-            bw = branch_w,
-        );
+        t.row([
+            r.name.clone(),
+            r.state.clone(),
+            r.head.clone(),
+            r.branch.clone(),
+            r.detail.clone(),
+        ]);
+    }
+    t.print();
+
+    if strict && rows.iter().any(|r| !r.is_clean) {
+        return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -293,28 +266,42 @@ struct StatusRow {
     head: String,
     branch: String,
     detail: String,
+    /// True if the repo is in a state `--strict` considers acceptable:
+    /// present, clean, and either on target or with no target specified.
+    is_clean: bool,
 }
 
 impl StatusRow {
     fn from(s: &status::RepoStatus) -> Self {
-        let (state, head, branch, detail) = match &s.state {
+        let (state, head, branch, detail, is_clean) = match &s.state {
             RepoState::Missing => (
                 "missing".to_string(),
                 "-".to_string(),
                 "-".to_string(),
                 "not cloned".to_string(),
+                false,
             ),
             RepoState::NotARepo => (
                 "not-git".to_string(),
                 "-".to_string(),
                 "-".to_string(),
                 "path exists but is not a git repo".to_string(),
+                false,
             ),
             RepoState::Present(info) => {
                 let head_short = short_sha(&info.head);
                 let branch = info.branch.clone().unwrap_or_else(|| "(detached)".into());
                 let (state, detail) = classify(info);
-                (state, head_short, branch, detail)
+                let is_clean = !info.dirty
+                    && matches!(
+                        info.target,
+                        TargetState::Unspecified
+                            | TargetState::Resolved {
+                                comparison: HeadCompare::OnTarget,
+                                ..
+                            }
+                    );
+                (state, head_short, branch, detail, is_clean)
             }
         };
         StatusRow {
@@ -323,6 +310,7 @@ impl StatusRow {
             head,
             branch,
             detail,
+            is_clean,
         }
     }
 }
@@ -496,7 +484,7 @@ fn describe_action(action: &Action) -> (&'static str, String) {
     }
 }
 
-fn not_implemented(cmd: &str) -> Result<()> {
-    println!("{cmd}: not implemented");
-    Ok(())
+fn not_implemented(cmd: &str) -> Result<ExitCode> {
+    eprintln!("error: `{cmd}` is not implemented yet");
+    Ok(ExitCode::FAILURE)
 }

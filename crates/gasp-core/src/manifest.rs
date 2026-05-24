@@ -101,6 +101,9 @@ impl Manifest {
             if !seen.insert(repo.name.as_str()) {
                 return Err(Error::DuplicateRepoName(repo.name.clone()));
             }
+            if let Some(p) = &repo.path {
+                validate_repo_path(&repo.name, p)?;
+            }
         }
         Ok(())
     }
@@ -139,6 +142,37 @@ impl Manifest {
     pub fn effective_host(&self) -> &str {
         self.defaults.host.as_deref().unwrap_or(DEFAULT_HOST)
     }
+}
+
+fn validate_repo_path(name: &str, path: &Path) -> Result<()> {
+    if path.is_absolute() {
+        return Err(Error::InvalidRepoPath {
+            name: name.to_string(),
+            path: path.display().to_string(),
+            reason: "must be relative to the workspace root".into(),
+        });
+    }
+    for component in path.components() {
+        use std::path::Component;
+        match component {
+            Component::ParentDir => {
+                return Err(Error::InvalidRepoPath {
+                    name: name.to_string(),
+                    path: path.display().to_string(),
+                    reason: "must not contain '..' (would escape the workspace)".into(),
+                });
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(Error::InvalidRepoPath {
+                    name: name.to_string(),
+                    path: path.display().to_string(),
+                    reason: "must be relative to the workspace root".into(),
+                });
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -283,6 +317,57 @@ url  = ""
     fn rejects_malformed_toml() {
         let err = parse("version = \n").unwrap_err();
         assert!(matches!(err, Error::ManifestParse { .. }));
+    }
+
+    #[test]
+    fn rejects_path_with_parent_dir_component() {
+        let text = r#"
+version = 1
+[[repos]]
+name = "lib"
+url  = "acme/lib"
+path = "../escape"
+"#;
+        let err = parse(text).unwrap_err();
+        assert!(matches!(err, Error::InvalidRepoPath { ref name, .. } if name == "lib"));
+    }
+
+    #[test]
+    fn rejects_absolute_path() {
+        let text = r#"
+version = 1
+[[repos]]
+name = "lib"
+url  = "acme/lib"
+path = "/etc/passwd"
+"#;
+        let err = parse(text).unwrap_err();
+        assert!(matches!(err, Error::InvalidRepoPath { ref name, .. } if name == "lib"));
+    }
+
+    #[test]
+    fn rejects_parent_dir_in_middle() {
+        let text = r#"
+version = 1
+[[repos]]
+name = "lib"
+url  = "acme/lib"
+path = "ok/../escape"
+"#;
+        let err = parse(text).unwrap_err();
+        assert!(matches!(err, Error::InvalidRepoPath { .. }));
+    }
+
+    #[test]
+    fn allows_normal_relative_path() {
+        let text = r#"
+version = 1
+[[repos]]
+name = "lib"
+url  = "acme/lib"
+path = "services/lib"
+"#;
+        parse(text).unwrap();
     }
 
     #[test]

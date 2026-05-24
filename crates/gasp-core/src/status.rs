@@ -17,14 +17,12 @@ pub struct RepoStatus {
     pub name: String,
     /// Path as written in the manifest (may be relative).
     pub path: PathBuf,
-    /// Absolute on-disk path under the workspace root.
-    pub absolute_path: PathBuf,
     pub state: RepoState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoState {
-    /// `absolute_path` does not exist.
+    /// The repo's path does not exist on disk.
     Missing,
     /// Path exists but isn't a git repository.
     NotARepo,
@@ -97,7 +95,6 @@ pub fn inspect(workspace: &Workspace, repo: &Repo) -> Result<RepoStatus> {
     Ok(RepoStatus {
         name: repo.name.clone(),
         path: repo.path.clone(),
-        absolute_path: abs,
         state,
     })
 }
@@ -128,8 +125,8 @@ fn compare(repo_path: &std::path::Path, head: &str, target: &str) -> Result<Head
         path: repo_path.to_path_buf(),
         source,
     })?;
-    let head_oid = parse_oid(head)?;
-    let target_oid = parse_oid(target)?;
+    let head_oid = parse_oid(head, repo_path)?;
+    let target_oid = parse_oid(target, repo_path)?;
     match repo.graph_ahead_behind(head_oid, target_oid) {
         Ok((ahead, behind)) => Ok(match (ahead, behind) {
             (0, 0) => HeadCompare::OnTarget,
@@ -144,10 +141,10 @@ fn compare(repo_path: &std::path::Path, head: &str, target: &str) -> Result<Head
     }
 }
 
-fn parse_oid(s: &str) -> Result<Oid> {
+fn parse_oid(s: &str, repo_path: &std::path::Path) -> Result<Oid> {
     Oid::from_str(s).map_err(|source| Error::LibGit {
-        operation: "parse oid".into(),
-        path: PathBuf::from(s),
+        operation: format!("parse oid '{s}'"),
+        path: repo_path.to_path_buf(),
         source,
     })
 }
