@@ -368,16 +368,19 @@ fn cmd_status(strict: bool, show_manifest: bool) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let mut rows: Vec<StatusRow> = Vec::with_capacity(repos.len());
-    let mut all_inspected: Vec<status::RepoStatus> = Vec::with_capacity(repos.len());
-    for r in &repos {
-        let s = status::inspect(&ws, r)?;
-        rows.push(StatusRow::from(&s));
-        all_inspected.push(s);
-    }
+    let mut entries: Vec<(StatusRow, status::RepoStatus)> = repos
+        .iter()
+        .map(|r| {
+            let s = status::inspect(&ws, r)?;
+            Ok((StatusRow::from(&s), s))
+        })
+        .collect::<Result<_>>()?;
+    // Sort the top-level rows alphabetically by repo name. Worktrees
+    // attached to each repo stay nested under their parent.
+    entries.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
 
     let mut t = Table::new(&["NAME", "STATE", "HEAD", "BRANCH", "DETAIL"]);
-    for (row, inspected) in rows.iter().zip(all_inspected.iter()) {
+    for (row, inspected) in &entries {
         t.row([
             row.name.clone(),
             row.state.clone(),
@@ -386,8 +389,11 @@ fn cmd_status(strict: bool, show_manifest: bool) -> Result<ExitCode> {
             row.detail.clone(),
         ]);
         // One sub-row per linked worktree, indented with a leading
-        // arrow so it visually nests under its repo.
-        for wt in &inspected.worktrees {
+        // arrow so it visually nests under its repo. Worktrees within
+        // a repo are also sorted by name.
+        let mut wts: Vec<&status::WorktreeStatus> = inspected.worktrees.iter().collect();
+        wts.sort_by(|a, b| a.name.cmp(&b.name));
+        for wt in wts {
             let (state, head, branch_label) = describe_worktree(wt);
             let detail = format!("worktree at {}", wt.path.display());
             t.row([
@@ -401,7 +407,7 @@ fn cmd_status(strict: bool, show_manifest: bool) -> Result<ExitCode> {
     }
     t.print();
 
-    if strict && rows.iter().any(|r| !r.is_clean) {
+    if strict && entries.iter().any(|(r, _)| !r.is_clean) {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
