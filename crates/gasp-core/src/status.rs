@@ -37,6 +37,9 @@ pub struct RepoInfo {
     pub branch: Option<String>,
     pub dirty: bool,
     pub target: TargetState,
+    /// True if the current branch has an upstream tracking branch
+    /// configured. Always `false` when `branch` is `None`.
+    pub has_upstream: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +81,7 @@ pub struct ManifestStatus {
     pub head: String,
     pub branch: Option<String>,
     pub dirty: bool,
+    pub has_upstream: bool,
 }
 
 pub fn inspect_manifest(workspace: &Workspace) -> Result<Option<ManifestStatus>> {
@@ -90,6 +94,7 @@ pub fn inspect_manifest(workspace: &Workspace) -> Result<Option<ManifestStatus>>
         head: git::local::head_sha(&repo)?,
         branch: git::local::current_branch(&repo)?,
         dirty: git::local::is_dirty(&repo)?,
+        has_upstream: git::local::has_upstream(&repo)?,
     }))
 }
 
@@ -105,12 +110,14 @@ pub fn inspect(workspace: &Workspace, repo: &Repo) -> Result<RepoStatus> {
         let head = git::local::head_sha(&abs)?;
         let branch = git::local::current_branch(&abs)?;
         let dirty = git::local::is_dirty(&abs)?;
+        let has_upstream = git::local::has_upstream(&abs)?;
         let target = build_target_state(&abs, repo, &head)?;
         RepoState::Present(RepoInfo {
             head,
             branch,
             dirty,
             target,
+            has_upstream,
         })
     };
 

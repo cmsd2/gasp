@@ -317,18 +317,23 @@ fn cmd_status(strict: bool, show_manifest: bool) -> Result<ExitCode> {
     let ws = Workspace::discover(&cwd)?;
 
     if show_manifest && let Some(m) = status::inspect_manifest(&ws)? {
-        let branch = m.branch.as_deref().unwrap_or("(detached)");
+        let branch_label = match (&m.branch, m.has_upstream) {
+            (Some(b), true) => format!("{b} ↑"),
+            (Some(b), false) => format!("{b} (no upstream)"),
+            (None, _) => "(detached)".to_string(),
+        };
         let state = if m.dirty { "dirty" } else { "clean" };
+        let notes = match (m.dirty, m.has_upstream) {
+            (true, _) => "uncommitted changes",
+            (false, true) => "no local changes",
+            (false, false) => "no local changes; no upstream tracking",
+        };
         println!(
             "manifest: {} {} on {} ({})",
             short_sha(&m.head),
             state,
-            branch,
-            if m.dirty {
-                "uncommitted changes"
-            } else {
-                "no local changes"
-            },
+            branch_label,
+            notes,
         );
         println!();
     }
@@ -397,7 +402,14 @@ impl StatusRow {
             ),
             RepoState::Present(info) => {
                 let head_short = short_sha(&info.head);
-                let branch = info.branch.clone().unwrap_or_else(|| "(detached)".into());
+                // Annotate the branch column with an upstream indicator
+                // so users can see at a glance which branches `gasp
+                // sync` can fast-forward.
+                let branch = match (&info.branch, info.has_upstream) {
+                    (Some(b), true) => format!("{b} ↑"),
+                    (Some(b), false) => format!("{b} (no upstream)"),
+                    (None, _) => "(detached)".to_string(),
+                };
                 let (state, detail) = classify(info);
                 let is_clean = !info.dirty
                     && matches!(
@@ -510,6 +522,20 @@ fn cmd_sync(
                     "manifest: skipped update ({}, uncommitted changes)",
                     short_sha(&sha)
                 );
+            }
+            ManifestUpdate::SkippedNoUpstream { sha, branch } => {
+                let suggest = match branch {
+                    Some(b) => format!(
+                        "  hint: git -C {} branch --set-upstream-to=origin/{b} {b}",
+                        ws.manifest_repo_dir().display()
+                    ),
+                    None => "  hint: HEAD is detached; check out a branch first".into(),
+                };
+                println!(
+                    "manifest: skipped update ({}, no upstream tracking)",
+                    short_sha(&sha)
+                );
+                println!("{suggest}");
             }
         }
     }

@@ -170,6 +170,7 @@ mod tests {
             branch: Some("main".into()),
             dirty,
             target,
+            has_upstream: true,
         }
     }
 

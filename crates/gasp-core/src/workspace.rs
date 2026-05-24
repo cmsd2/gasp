@@ -34,6 +34,11 @@ pub enum ManifestUpdate {
     Advanced { from: String, to: String },
     /// Skipped because the manifest repo has uncommitted changes.
     SkippedDirty { sha: String },
+    /// Skipped because the current branch has no upstream tracking
+    /// configured (detached HEAD, or `branch.<name>.remote` unset).
+    /// Carries the current branch name (if any) and HEAD sha so the
+    /// CLI can suggest a fix.
+    SkippedNoUpstream { sha: String, branch: Option<String> },
 }
 
 /// A discovered or freshly initialized gasp workspace.
@@ -171,7 +176,8 @@ impl Workspace {
 
     /// Fetch + fast-forward the cloned manifest repo. Returns `None`
     /// for Loose-mode workspaces. Skips (without erroring) when the
-    /// manifest repo has uncommitted changes — the user owns those.
+    /// manifest repo has uncommitted changes or when the current
+    /// branch has no upstream tracking — both are user-owned states.
     pub fn update_manifest(&self) -> Result<Option<ManifestUpdate>> {
         if self.manifest_mode() != ManifestMode::Cloned {
             return Ok(None);
@@ -181,6 +187,16 @@ impl Workspace {
 
         if crate::git::local::is_dirty(&repo)? {
             return Ok(Some(ManifestUpdate::SkippedDirty { sha: before }));
+        }
+
+        // Pre-flight via libgit2 so we never run `git pull` only to
+        // hit "no tracking information" — a noisy failure that the
+        // user can do nothing about until they configure upstream.
+        if !crate::git::local::has_upstream(&repo)? {
+            return Ok(Some(ManifestUpdate::SkippedNoUpstream {
+                sha: before,
+                branch: crate::git::local::current_branch(&repo)?,
+            }));
         }
 
         crate::git::remote::pull_ff_only(&repo)?;

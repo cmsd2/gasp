@@ -91,6 +91,30 @@ pub fn is_repo(path: &Path) -> bool {
     Repository::open(path).is_ok()
 }
 
+/// True if the currently-checked-out branch has an upstream tracking
+/// branch configured. Detached HEAD returns `false`. Used to avoid
+/// calling `git pull` in repos where it would just fail with "no
+/// tracking information".
+pub fn has_upstream(path: &Path) -> Result<bool> {
+    let repo = open(path)?;
+    let head = repo.head().map_err(map_err("head", path))?;
+    if !head.is_branch() {
+        return Ok(false);
+    }
+    let Some(refname) = head.name() else {
+        return Ok(false);
+    };
+    match repo.branch_upstream_name(refname) {
+        Ok(_) => Ok(true),
+        Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(false),
+        Err(source) => Err(Error::LibGit {
+            operation: "branch_upstream_name".into(),
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
