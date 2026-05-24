@@ -1,0 +1,11 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.85"
+license      = "GPL-3.0-or-later"
+repository   = "https://github.com/cmsd2/gasp"
+authors      = ["cmsd2 <cmsd2@cantab.net>"]
