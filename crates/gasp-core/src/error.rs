@@ -52,6 +52,19 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("failed to invoke git: {source}")]
+    GitSpawn {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("git {operation} failed for {target}: {stderr}")]
+    GitFailed {
+        operation: String,
+        target: String,
+        stderr: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

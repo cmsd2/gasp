@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use gasp_core::Workspace;
+use gasp_core::{Workspace, git};
 
 #[derive(Parser)]
 #[command(name = "gasp", version, about = "Multi-repo workspace manager")]
@@ -83,7 +83,7 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err:#}");
             ExitCode::FAILURE
@@ -91,17 +91,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Init { manifest } => cmd_init(&manifest),
-        Command::List => cmd_list(),
-        Command::Sync { .. } => not_implemented("sync"),
-        Command::Status => not_implemented("status"),
-        Command::Foreach { .. } => not_implemented("foreach"),
-        Command::Freeze { .. } => not_implemented("freeze"),
-        Command::Add { .. } => not_implemented("add"),
-        Command::Remove { .. } => not_implemented("remove"),
-        Command::Doctor => not_implemented("doctor"),
+        Command::Init { manifest } => cmd_init(&manifest).map(|()| ExitCode::SUCCESS),
+        Command::List => cmd_list().map(|()| ExitCode::SUCCESS),
+        Command::Sync { groups, .. } => cmd_sync(&groups),
+        Command::Status => not_implemented("status").map(|()| ExitCode::SUCCESS),
+        Command::Foreach { .. } => not_implemented("foreach").map(|()| ExitCode::SUCCESS),
+        Command::Freeze { .. } => not_implemented("freeze").map(|()| ExitCode::SUCCESS),
+        Command::Add { .. } => not_implemented("add").map(|()| ExitCode::SUCCESS),
+        Command::Remove { .. } => not_implemented("remove").map(|()| ExitCode::SUCCESS),
+        Command::Doctor => not_implemented("doctor").map(|()| ExitCode::SUCCESS),
     }
 }
 
@@ -159,6 +159,64 @@ fn cmd_list() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn cmd_sync(group_filter: &[String]) -> Result<ExitCode> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    let manifest = ws.load_manifest()?;
+    let mut repos = manifest.resolve()?;
+
+    if !group_filter.is_empty() {
+        repos.retain(|r| r.groups.iter().any(|g| group_filter.contains(g)));
+    }
+
+    if repos.is_empty() {
+        println!("(no repos match)");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut cloned = 0usize;
+    let mut skipped = 0usize;
+    let mut failed: Vec<(String, gasp_core::Error)> = Vec::new();
+
+    for repo in &repos {
+        let dest = ws.repo_path(&repo.path);
+        if dest.exists() {
+            println!("  skip   {} (already present)", repo.name);
+            skipped += 1;
+            continue;
+        }
+
+        print!("  clone  {} ... ", repo.name);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        match git::clone(&repo.url, &dest, repo.revision.as_deref()) {
+            Ok(()) => {
+                println!("ok");
+                cloned += 1;
+            }
+            Err(err) => {
+                println!("FAILED");
+                failed.push((repo.name.clone(), err));
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "Summary: {cloned} cloned, {skipped} skipped, {} failed",
+        failed.len()
+    );
+
+    if !failed.is_empty() {
+        println!("\nFailures:");
+        for (name, err) in &failed {
+            println!("  {name}: {err}");
+        }
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn not_implemented(cmd: &str) -> Result<()> {

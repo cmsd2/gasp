@@ -1,4 +1,5 @@
 pub mod error;
+pub mod git;
 pub mod manifest;
 pub mod url;
 pub mod workspace;

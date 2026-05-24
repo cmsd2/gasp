@@ -21,6 +21,11 @@ pub fn normalize(raw: &str, host: &str, repo_name: &str) -> Result<String> {
         return Ok(raw.to_string());
     }
 
+    // Filesystem paths: absolute (/...) or explicit relative (./..., ../...).
+    if raw.starts_with('/') || raw.starts_with("./") || raw.starts_with("../") {
+        return Ok(raw.to_string());
+    }
+
     // SCP-style SSH: user@host:path
     if let Some(at_pos) = raw.find('@')
         && raw[at_pos..].contains(':')
@@ -118,6 +123,17 @@ mod tests {
     fn unsafe_characters_rejected() {
         let err = normalize("acme/repo space", "github.com", "lib").unwrap_err();
         assert!(matches!(err, Error::InvalidRepoUrl { .. }));
+    }
+
+    #[test]
+    fn absolute_filesystem_path_passes_through() {
+        assert_eq!(n("/tmp/repos/foo.git"), "/tmp/repos/foo.git");
+    }
+
+    #[test]
+    fn relative_filesystem_path_passes_through() {
+        assert_eq!(n("./local-repo"), "./local-repo");
+        assert_eq!(n("../sibling"), "../sibling");
     }
 
     #[test]
