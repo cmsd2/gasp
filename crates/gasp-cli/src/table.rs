@@ -32,11 +32,11 @@ impl Table {
 
         let mut widths = vec![0usize; n];
         for (i, h) in self.headers.iter().enumerate() {
-            widths[i] = h.len();
+            widths[i] = display_width(h);
         }
         for row in &self.rows {
             for (i, cell) in row.iter().enumerate().take(n) {
-                widths[i] = widths[i].max(cell.len());
+                widths[i] = widths[i].max(display_width(cell));
             }
         }
 
@@ -54,6 +54,14 @@ impl Table {
     }
 }
 
+/// Visible width of a string, ignoring ANSI escape sequences and
+/// accounting for multi-cell characters. `console`'s helper does both,
+/// so styled cells (e.g. via `style::name`) still line up correctly
+/// in a TTY where they carry escape codes.
+fn display_width(s: &str) -> usize {
+    console::measure_text_width(s)
+}
+
 fn print_row(cells: &[String], widths: &[usize]) {
     let last = widths.len().saturating_sub(1);
     let empty = String::new();
@@ -63,7 +71,10 @@ fn print_row(cells: &[String], widths: &[usize]) {
             // Last column: no trailing padding.
             println!("{cell}");
         } else {
-            print!("{cell:<w$}  ", w = *w);
+            // Pad based on visible width (ignoring ANSI escapes), not
+            // raw byte/char length.
+            let pad = w.saturating_sub(display_width(cell));
+            print!("{cell}{:pad$}  ", "", pad = pad);
         }
     }
 }

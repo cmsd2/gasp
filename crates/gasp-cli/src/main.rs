@@ -12,10 +12,12 @@ use gasp_core::status::{HeadCompare, RepoState, TargetState};
 use gasp_core::sync::{Action, ConflictMode};
 use gasp_core::workspace::ManifestUpdate;
 use gasp_core::{Workspace, edit, freeze, status, sync};
-use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
+mod live;
+mod style;
 mod table;
+use live::LiveDisplay;
 use table::Table;
 
 /// CLI-side parallel to [`ConflictMode`] so we can derive `ValueEnum`
@@ -401,8 +403,8 @@ fn cmd_status(strict: bool, show_manifest: bool) -> Result<ExitCode> {
     let mut t = Table::new(&["NAME", "STATE", "HEAD", "BRANCH", "DETAIL"]);
     for (row, inspected) in &entries {
         t.row([
-            row.name.clone(),
-            row.state.clone(),
+            style::name(&row.name).to_string(),
+            style::state(&row.state).to_string(),
             row.head.clone(),
             row.branch.clone(),
             row.detail.clone(),
@@ -595,17 +597,13 @@ fn cmd_fetch(
         .build()
         .context("building rayon pool")?;
 
-    let pb = ProgressBar::new(repos.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template("[{pos}/{len}] {wide_msg}")
-            .expect("static template")
-            .progress_chars("=> "),
-    );
+    let display = LiveDisplay::new(repos.len() as u64, "fetching");
 
     let outcomes: Vec<FetchOutcome> = pool.install(|| {
         repos
             .par_iter()
             .map(|repo| {
+                let spinner = display.start_task(&repo.name);
                 let dest = ws.repo_path(&repo.path);
                 let outcome = if !dest.exists() {
                     FetchOutcome::Skipped {
@@ -623,14 +621,12 @@ fn cmd_fetch(
                         },
                     }
                 };
-                println!("{}", outcome.line());
-                pb.set_message(repo.name.clone());
-                pb.inc(1);
+                display.finish_task(spinner, &outcome.line());
                 outcome
             })
             .collect()
     });
-    pb.finish_and_clear();
+    display.finish();
 
     let mut ok = 0usize;
     let mut skipped = 0usize;
@@ -676,10 +672,22 @@ enum FetchOutcome {
 
 impl FetchOutcome {
     fn line(&self) -> String {
+        let label = style::verb("fetch ");
         match self {
-            Self::Ok { name } => format!("  fetch  {name} ... ok"),
-            Self::Skipped { name, reason } => format!("  fetch  {name} ... skipped ({reason})"),
-            Self::Failed { name, .. } => format!("  fetch  {name} ... FAILED"),
+            Self::Ok { name } => {
+                format!("  {label} {} ... {}", style::name(name), style::ok("ok"),)
+            }
+            Self::Skipped { name, reason } => format!(
+                "  {label} {} ... {} ({})",
+                style::name(name),
+                style::skipped("skipped"),
+                style::dim(reason),
+            ),
+            Self::Failed { name, .. } => format!(
+                "  {label} {} ... {}",
+                style::name(name),
+                style::failed("FAILED"),
+            ),
         }
     }
 }
@@ -752,31 +760,21 @@ fn cmd_sync(
         .build()
         .context("building rayon pool")?;
 
-    let pb = ProgressBar::new(repos.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template("[{pos}/{len}] {wide_msg}")
-            .expect("static template")
-            .progress_chars("=> "),
-    );
+    let display = LiveDisplay::new(repos.len() as u64, "syncing");
 
     let outcomes: Vec<SyncOutcome> = pool.install(|| {
         repos
             .par_iter()
             .map(|repo| {
+                let spinner = display.start_task(&repo.name);
                 let outcome = sync_one(&ws, repo, mode);
-                // println! holds the stdout lock per call, so per-repo
-                // lines from different workers won't interleave inside
-                // a line. They will be in nondeterministic order across
-                // lines.
-                println!("{}", outcome.line());
-                pb.set_message(repo.name.clone());
-                pb.inc(1);
+                display.finish_task(spinner, &outcome.line());
                 outcome
             })
             .collect()
     });
 
-    pb.finish_and_clear();
+    display.finish();
 
     let mut counts = SyncCounts::default();
     let mut failed: Vec<&SyncOutcome> = Vec::new();
@@ -834,10 +832,21 @@ impl SyncOutcome {
         match &self.result {
             SyncResult::Done(action) => {
                 let (label, detail) = describe_action(action);
-                format!("  {label:<6} {} {detail} ... ok", self.name)
+                let coloured_label = style::verb(format!("{label:<6}"));
+                format!(
+                    "  {coloured_label} {} {} ... {}",
+                    style::name(&self.name),
+                    style::dim(&detail),
+                    style::ok("ok"),
+                )
             }
             SyncResult::Failed(_) => {
-                format!("  error  {} ... FAILED", self.name)
+                format!(
+                    "  {} {} ... {}",
+                    style::failed(format!("{:<6}", "error")),
+                    style::name(&self.name),
+                    style::failed("FAILED"),
+                )
             }
         }
     }
