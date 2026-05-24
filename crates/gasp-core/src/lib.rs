@@ -4,6 +4,7 @@ pub mod freeze;
 pub mod git;
 pub mod lock;
 pub mod manifest;
+pub mod manifest_init;
 pub mod status;
 pub mod sync;
 pub mod url;

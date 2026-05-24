@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use gasp_core::edit::AddArgs;
 use gasp_core::lock::WorkspaceLock;
 use gasp_core::manifest::Repo;
+use gasp_core::manifest_init::{self, InitOpts};
 use gasp_core::status::{HeadCompare, RepoState, TargetState};
 use gasp_core::sync::{Action, ConflictMode};
 use gasp_core::workspace::ManifestUpdate;
@@ -140,6 +141,30 @@ enum Command {
 
     /// Check that the local environment can reach the manifest's hosts.
     Doctor,
+
+    /// Manage the cloned manifest repository.
+    Manifest {
+        #[command(subcommand)]
+        cmd: ManifestCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ManifestCmd {
+    /// Graduate a loose `.workspace/workspace.toml` into a fresh local
+    /// git repo at `.workspace/manifest/`, with a templated README.
+    Init {
+        /// Display name used in the README template. Defaults to the
+        /// workspace root directory name.
+        #[arg(long)]
+        name: Option<String>,
+        /// URL to set as the `origin` remote.
+        #[arg(long, value_name = "URL")]
+        remote: Option<String>,
+        /// Push to origin after committing. Requires `--remote`.
+        #[arg(long, requires = "remote")]
+        push: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -180,6 +205,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             .map(|()| ExitCode::SUCCESS),
         Command::Remove { name } => cmd_remove(&name).map(|()| ExitCode::SUCCESS),
         Command::Doctor => cmd_doctor(),
+        Command::Manifest { cmd } => match cmd {
+            ManifestCmd::Init { name, remote, push } => {
+                cmd_manifest_init(name.as_deref(), remote.as_deref(), push)
+                    .map(|()| ExitCode::SUCCESS)
+            }
+        },
     }
 }
 
@@ -677,6 +708,28 @@ fn describe_action(action: &Action) -> (&'static str, String) {
     }
 }
 
+fn cmd_manifest_init(name: Option<&str>, remote: Option<&str>, push: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    let outcome = manifest_init::init(&ws, &InitOpts { name, remote, push })?;
+    println!(
+        "Created manifest repo at {}",
+        outcome.manifest_repo.display()
+    );
+    if outcome.remote_set {
+        println!(
+            "  origin → {}",
+            remote.expect("remote_set implies --remote was given")
+        );
+    }
+    if outcome.pushed {
+        println!("  pushed main to origin");
+    } else if outcome.remote_set {
+        println!("  (run `git -C .workspace/manifest push -u origin main` when ready)");
+    }
+    Ok(())
+}
+
 fn cmd_doctor() -> Result<ExitCode> {
     let mut all_ok = true;
 
@@ -904,6 +957,16 @@ fn cmd_freeze(output: Option<&std::path::Path>) -> Result<()> {
     let ws = Workspace::discover(&cwd)?;
     let body = freeze::freeze(&ws)?;
 
+    // `-` means stdout. The manifest is the only thing on stdout in
+    // this mode so the command can be piped.
+    if output == Some(std::path::Path::new("-")) {
+        use std::io::Write as _;
+        std::io::stdout()
+            .write_all(body.as_bytes())
+            .context("writing manifest to stdout")?;
+        return Ok(());
+    }
+
     let default_path = ws.root().join("workspace.frozen.toml");
     let target = output.unwrap_or(&default_path);
 
@@ -911,6 +974,7 @@ fn cmd_freeze(output: Option<&std::path::Path>) -> Result<()> {
         anyhow::bail!("refusing to overwrite existing file: {}", target.display());
     }
     std::fs::write(target, &body).with_context(|| format!("writing {}", target.display()))?;
-    println!("Wrote frozen manifest to {}", target.display());
+    // Status message → stderr, so it never pollutes stdout pipelines.
+    eprintln!("Wrote frozen manifest to {}", target.display());
     Ok(())
 }

@@ -96,6 +96,12 @@ pub enum Error {
 
     #[error("repo '{0}' not found in the manifest")]
     RepoNotFound(String),
+
+    #[error("manifest is already a cloned git repository at {0}")]
+    ManifestAlreadyCloned(PathBuf),
+
+    #[error("template error: {0}")]
+    Template(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

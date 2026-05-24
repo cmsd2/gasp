@@ -1046,6 +1046,113 @@ revision = "main"
 }
 
 #[test]
+fn freeze_to_dash_writes_manifest_to_stdout() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    let out = f.gasp(&["freeze", "-o", "-"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[[repos]]"), "{stdout}");
+    assert!(stdout.contains("revision = \""), "{stdout}");
+    // Nothing on stderr; no file created.
+    assert!(out.stderr.is_empty(), "stderr was: {:?}", out.stderr);
+    assert!(!f.workspace.join("workspace.frozen.toml").exists());
+}
+
+#[test]
+fn freeze_to_file_puts_status_on_stderr() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    let out = f.gasp(&["freeze"]);
+    assert!(out.status.success());
+    // Status line should be on stderr, leaving stdout empty so scripts
+    // can pipe `gasp freeze` to capture the file path or whatever.
+    assert!(out.stdout.is_empty(), "stdout was: {:?}", out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Wrote frozen manifest"), "{stderr}");
+}
+
+#[test]
+fn manifest_init_graduates_loose_workspace() {
+    let f = Fixture::new();
+    let seed = f.write_manifest("version = 1\n");
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    // Loose mode before.
+    assert!(f.workspace.join(".workspace/workspace.toml").exists());
+    assert!(!f.workspace.join(".workspace/manifest/.git").exists());
+
+    let out = f.gasp(&["manifest", "init", "--name", "my-cool-thing"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Cloned mode after.
+    assert!(!f.workspace.join(".workspace/workspace.toml").exists());
+    assert!(f.workspace.join(".workspace/manifest/.git").exists());
+    assert!(
+        f.workspace
+            .join(".workspace/manifest/workspace.toml")
+            .is_file()
+    );
+    let readme =
+        std::fs::read_to_string(f.workspace.join(".workspace/manifest/README.md")).unwrap();
+    assert!(readme.contains("my-cool-thing"), "{readme}");
+
+    // status --show-manifest now reports the new manifest repo.
+    let out = f.gasp(&["status", "--show-manifest"]);
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("manifest:"));
+}
+
+#[test]
+fn manifest_init_errors_if_already_cloned() {
+    let f = Fixture::new();
+    let seed = f.write_manifest("version = 1\n");
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["manifest", "init"]).status.success());
+
+    let out = f.gasp(&["manifest", "init"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already a cloned"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn add_then_remove_round_trips() {
     let f = Fixture::new();
     let seed = f.write_manifest("version = 1\n");
