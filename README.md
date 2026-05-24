@@ -58,6 +58,7 @@ gasp sync
 | `gasp manifest init [--name X] [--remote URL] [--push]` | Create a fresh manifest repo. Works from an empty directory (bootstraps a default template) or graduates an existing loose-file workspace. |
 | `gasp manifest push` | Push commits from the cloned manifest repo to its `origin`. Auto-sets the upstream on first push. |
 | `gasp sync [--on-conflict refuse\|rebase\|reset] [--group X] [-j N] [--no-update-manifest] [--no-update-context]` | Clone missing repos; update existing ones. Fast-forwards by default. In cloned-manifest mode, pulls the manifest first; if `[context]` is configured, refreshes the aggregated instructions and skill symlinks afterward. |
+| `gasp fetch [--group X] [-j N] [--no-fetch-manifest]` | Fetch every repo's remote in parallel without touching working trees. Useful for previewing upstream changes (then `gasp status` shows what's ahead/behind) before deciding whether to `gasp sync`. |
 | `gasp context sync` | Run the agent-context aggregation explicitly. No-op when the manifest has no `[context]` section. |
 | `gasp status [--show-manifest] [--strict]` | Show per-repo state (clean / dirty / ahead / behind / diverged / missing) with upstream-tracking annotations. `--show-manifest` adds a line for the cloned-manifest repo. `--strict` exits non-zero on any issue (CI-friendly). |
 | `gasp list` | Print the resolved repos in the manifest. |

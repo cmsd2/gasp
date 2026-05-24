@@ -1516,6 +1516,104 @@ fn sync_no_update_context_skips_context_phase() {
 }
 
 #[test]
+fn fetch_updates_remote_refs_without_changing_working_tree() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+revision = "main"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Advance the upstream so a fetch will actually pull new refs.
+    let src = f._root.path().join("src").join("alpha");
+    std::fs::write(src.join("new"), "x\n").unwrap();
+    run(&src, "git", &["add", "-A"]);
+    run(
+        &src,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "advance",
+        ],
+    );
+    run(&src, "git", &["push", "-q", bare.to_str().unwrap(), "main"]);
+
+    // Snapshot the working tree before fetch.
+    let before_files: Vec<_> = std::fs::read_dir(f.workspace.join("alpha"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+
+    let out = f.gasp(&["fetch"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("1 fetched"), "{s}");
+
+    // Working tree is unchanged…
+    let after_files: Vec<_> = std::fs::read_dir(f.workspace.join("alpha"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(before_files, after_files);
+
+    // …but status now sees the repo as behind, because origin/main moved.
+    let out = f.gasp(&["status"]);
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("behind"));
+}
+
+#[test]
+fn fetch_skips_missing_repos() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+[[repos]]
+name = "ghost"
+url  = "{}"
+"#,
+        bare.display(),
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+    assert!(f.gasp(&["sync"]).status.success());
+
+    // Delete one of the cloned repos so it's "missing".
+    std::fs::remove_dir_all(f.workspace.join("ghost")).unwrap();
+
+    let out = f.gasp(&["fetch"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("1 fetched"), "{s}");
+    assert!(s.contains("1 skipped"), "{s}");
+    assert!(s.contains("ghost"));
+}
+
+#[test]
 fn sync_refuses_when_workspace_is_locked() {
     let f = Fixture::new();
     let bare = f.make_bare_repo("alpha");

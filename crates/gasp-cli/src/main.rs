@@ -61,6 +61,20 @@ enum Command {
         source: String,
     },
 
+    /// Fetch all repos' remotes without touching working trees.
+    /// Useful for previewing what's upstream before `gasp sync`.
+    Fetch {
+        /// Restrict to repos in the given group(s).
+        #[arg(long = "group", value_name = "GROUP")]
+        groups: Vec<String>,
+        /// Number of repos to fetch in parallel. Defaults to min(8, ncpu).
+        #[arg(long, short = 'j', value_name = "N")]
+        jobs: Option<usize>,
+        /// Skip fetching the cloned manifest repo.
+        #[arg(long)]
+        no_fetch_manifest: bool,
+    },
+
     /// Clone missing repos and update existing ones to match the manifest.
     Sync {
         /// Behavior when an existing repo can't be fast-forwarded.
@@ -208,6 +222,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Init { source } => cmd_init(&source).map(|()| ExitCode::SUCCESS),
         Command::List => cmd_list().map(|()| ExitCode::SUCCESS),
+        Command::Fetch {
+            groups,
+            jobs,
+            no_fetch_manifest,
+        } => cmd_fetch(&groups, jobs, !no_fetch_manifest),
         Command::Sync {
             on_conflict,
             groups,
@@ -536,6 +555,133 @@ fn describe_target_brief(t: &TargetState) -> String {
 
 fn short_sha(s: &str) -> String {
     s.chars().take(7).collect()
+}
+
+fn cmd_fetch(
+    group_filter: &[String],
+    jobs: Option<usize>,
+    fetch_manifest: bool,
+) -> Result<ExitCode> {
+    use gasp_core::git::remote;
+    use gasp_core::workspace::ManifestMode;
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let ws = Workspace::discover(&cwd)?;
+    let _lock = WorkspaceLock::acquire(&ws.dot_dir())?;
+
+    if fetch_manifest && ws.manifest_mode() == ManifestMode::Cloned {
+        let mrepo = ws.manifest_repo_dir();
+        match remote::fetch(&mrepo, "origin") {
+            Ok(()) => println!("manifest: fetched origin"),
+            Err(err) => {
+                println!("manifest: fetch FAILED ({err})");
+            }
+        }
+    }
+
+    let manifest = ws.load_manifest()?;
+    let mut repos = manifest.resolve()?;
+    if !group_filter.is_empty() {
+        repos.retain(|r| r.groups.iter().any(|g| group_filter.contains(g)));
+    }
+    if repos.is_empty() {
+        println!("(no repos match)");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let num_jobs = jobs.unwrap_or_else(|| num_cpus::get().min(8)).max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_jobs)
+        .build()
+        .context("building rayon pool")?;
+
+    let pb = ProgressBar::new(repos.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("[{pos}/{len}] {wide_msg}")
+            .expect("static template")
+            .progress_chars("=> "),
+    );
+
+    let outcomes: Vec<FetchOutcome> = pool.install(|| {
+        repos
+            .par_iter()
+            .map(|repo| {
+                let dest = ws.repo_path(&repo.path);
+                let outcome = if !dest.exists() {
+                    FetchOutcome::Skipped {
+                        name: repo.name.clone(),
+                        reason: "not cloned".into(),
+                    }
+                } else {
+                    match remote::fetch(&dest, &repo.remote) {
+                        Ok(()) => FetchOutcome::Ok {
+                            name: repo.name.clone(),
+                        },
+                        Err(err) => FetchOutcome::Failed {
+                            name: repo.name.clone(),
+                            error: err,
+                        },
+                    }
+                };
+                println!("{}", outcome.line());
+                pb.set_message(repo.name.clone());
+                pb.inc(1);
+                outcome
+            })
+            .collect()
+    });
+    pb.finish_and_clear();
+
+    let mut ok = 0usize;
+    let mut skipped = 0usize;
+    let mut failed: Vec<&FetchOutcome> = Vec::new();
+    for o in &outcomes {
+        match o {
+            FetchOutcome::Ok { .. } => ok += 1,
+            FetchOutcome::Skipped { .. } => skipped += 1,
+            FetchOutcome::Failed { .. } => failed.push(o),
+        }
+    }
+
+    println!();
+    println!(
+        "Summary: {ok} fetched, {skipped} skipped, {} failed",
+        failed.len()
+    );
+    if !failed.is_empty() {
+        println!("\nFailures:");
+        for o in &failed {
+            if let FetchOutcome::Failed { name, error } = o {
+                println!("  {name}: {error}");
+            }
+        }
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+enum FetchOutcome {
+    Ok {
+        name: String,
+    },
+    Skipped {
+        name: String,
+        reason: String,
+    },
+    Failed {
+        name: String,
+        error: gasp_core::Error,
+    },
+}
+
+impl FetchOutcome {
+    fn line(&self) -> String {
+        match self {
+            Self::Ok { name } => format!("  fetch  {name} ... ok"),
+            Self::Skipped { name, reason } => format!("  fetch  {name} ... skipped ({reason})"),
+            Self::Failed { name, .. } => format!("  fetch  {name} ... FAILED"),
+        }
+    }
 }
 
 fn cmd_sync(
