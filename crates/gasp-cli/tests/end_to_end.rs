@@ -242,6 +242,214 @@ revision = "main"
 }
 
 #[test]
+fn sync_auto_updates_cloned_manifest() {
+    let f = Fixture::new();
+    let code = f.make_bare_repo("alpha");
+    let manifest_src = f._root.path().join("manifest-src");
+    std::fs::create_dir_all(&manifest_src).unwrap();
+    run(&manifest_src, "git", &["init", "-q", "-b", "main", "."]);
+    std::fs::write(
+        manifest_src.join("workspace.toml"),
+        format!(
+            "version = 1\n[[repos]]\nname = \"alpha\"\nurl = \"{}\"\nrevision = \"main\"\n",
+            code.display()
+        ),
+    )
+    .unwrap();
+    run(&manifest_src, "git", &["add", "-A"]);
+    run(
+        &manifest_src,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "v1",
+        ],
+    );
+    let manifest_bare = f._root.path().join("manifest.git");
+    run(
+        f._root.path(),
+        "git",
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            manifest_src.to_str().unwrap(),
+            manifest_bare.to_str().unwrap(),
+        ],
+    );
+
+    assert!(
+        f.gasp(&["init", manifest_bare.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    // Initial sync — manifest is up to date.
+    let out = f.gasp(&["sync"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("manifest: up to date"), "{s}");
+
+    // Advance the manifest upstream: add a second repo.
+    let beta = f.make_bare_repo("beta");
+    std::fs::write(
+        manifest_src.join("workspace.toml"),
+        format!(
+            "version = 1\n\
+             [[repos]]\nname = \"alpha\"\nurl = \"{}\"\nrevision = \"main\"\n\
+             [[repos]]\nname = \"beta\"\nurl = \"{}\"\nrevision = \"main\"\n",
+            code.display(),
+            beta.display(),
+        ),
+    )
+    .unwrap();
+    run(&manifest_src, "git", &["add", "-A"]);
+    run(
+        &manifest_src,
+        "git",
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "v2",
+        ],
+    );
+    run(
+        &manifest_src,
+        "git",
+        &["push", "-q", manifest_bare.to_str().unwrap(), "main"],
+    );
+
+    // Next sync should pull the manifest AND clone the newly-added beta.
+    let out = f.gasp(&["sync"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = stdout_of(&out);
+    assert!(s.contains("manifest: advanced"), "{s}");
+    assert!(s.contains("clone  beta"), "{s}");
+    assert!(f.workspace.join("beta").exists());
+}
+
+#[test]
+fn sync_no_update_manifest_skips_pull() {
+    let f = Fixture::new();
+    let code = f.make_bare_repo("alpha");
+    let manifest_bare = make_bare_manifest_repo(
+        f._root.path(),
+        "manifest",
+        &format!(
+            "version = 1\n[[repos]]\nname = \"alpha\"\nurl = \"{}\"\nrevision = \"main\"\n",
+            code.display()
+        ),
+    );
+    assert!(
+        f.gasp(&["init", manifest_bare.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    let out = f.gasp(&["sync", "--no-update-manifest"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(!s.contains("manifest:"), "{s}");
+}
+
+#[test]
+fn sync_skips_manifest_update_when_dirty() {
+    let f = Fixture::new();
+    let code = f.make_bare_repo("alpha");
+    let manifest_bare = make_bare_manifest_repo(
+        f._root.path(),
+        "manifest",
+        &format!(
+            "version = 1\n[[repos]]\nname = \"alpha\"\nurl = \"{}\"\nrevision = \"main\"\n",
+            code.display()
+        ),
+    );
+    assert!(
+        f.gasp(&["init", manifest_bare.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    // Dirty the cloned manifest.
+    std::fs::write(
+        f.workspace
+            .join(".workspace")
+            .join("manifest")
+            .join("workspace.toml"),
+        "version = 1\n# local edit\n",
+    )
+    .unwrap();
+
+    let out = f.gasp(&["sync"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("manifest: skipped update"), "{s}");
+    assert!(s.contains("uncommitted"), "{s}");
+}
+
+#[test]
+fn status_hides_manifest_by_default_and_shows_with_flag() {
+    let f = Fixture::new();
+    let code = f.make_bare_repo("alpha");
+    let manifest_bare = make_bare_manifest_repo(
+        f._root.path(),
+        "manifest",
+        &format!(
+            "version = 1\n[[repos]]\nname = \"alpha\"\nurl = \"{}\"\nrevision = \"main\"\n",
+            code.display()
+        ),
+    );
+    assert!(
+        f.gasp(&["init", manifest_bare.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    // Default: no manifest section
+    let out = f.gasp(&["status"]);
+    assert!(out.status.success());
+    assert!(!stdout_of(&out).contains("manifest:"));
+
+    // With flag: shown
+    let out = f.gasp(&["status", "--show-manifest"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("manifest:"), "{s}");
+    assert!(s.contains("clean"), "{s}");
+
+    // Dirty the manifest — --show-manifest reports it
+    std::fs::write(
+        f.workspace
+            .join(".workspace")
+            .join("manifest")
+            .join("workspace.toml"),
+        "version = 1\n# dirty\n",
+    )
+    .unwrap();
+    let out = f.gasp(&["status", "--show-manifest"]);
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("manifest:"), "{s}");
+    assert!(s.contains("dirty"), "{s}");
+    assert!(s.contains("uncommitted"), "{s}");
+}
+
+#[test]
 fn init_rolls_back_when_remote_manifest_is_invalid() {
     let f = Fixture::new();
     let bad_bare = make_bare_manifest_repo(f._root.path(), "bad", "version = 99\n");

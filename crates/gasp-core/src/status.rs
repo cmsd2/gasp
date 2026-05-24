@@ -71,6 +71,28 @@ pub enum HeadCompare {
     Unknown,
 }
 
+/// Lightweight inspection of the cloned-manifest repo. Returns `None`
+/// for Loose-mode workspaces (no manifest repo to inspect).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestStatus {
+    pub head: String,
+    pub branch: Option<String>,
+    pub dirty: bool,
+}
+
+pub fn inspect_manifest(workspace: &Workspace) -> Result<Option<ManifestStatus>> {
+    use crate::workspace::ManifestMode;
+    if workspace.manifest_mode() != ManifestMode::Cloned {
+        return Ok(None);
+    }
+    let repo = workspace.manifest_repo_dir();
+    Ok(Some(ManifestStatus {
+        head: git::local::head_sha(&repo)?,
+        branch: git::local::current_branch(&repo)?,
+        dirty: git::local::is_dirty(&repo)?,
+    }))
+}
+
 /// Inspect a single repo against the workspace and produce its status.
 pub fn inspect(workspace: &Workspace, repo: &Repo) -> Result<RepoStatus> {
     let abs = workspace.repo_path(&repo.path);

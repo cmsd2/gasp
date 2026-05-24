@@ -64,6 +64,16 @@ pub fn reset_hard(repo: &Path, target: &str) -> Result<()> {
     )
 }
 
+/// `git -C <repo> pull --ff-only`. Fetches origin and fast-forwards the
+/// current branch; fails if a fast-forward isn't possible.
+pub fn pull_ff_only(repo: &Path) -> Result<()> {
+    run_git(
+        &mut git_in(repo, ["pull", "--ff-only"]),
+        "pull --ff-only",
+        "origin",
+    )
+}
+
 fn git_in<I, S>(repo: &Path, args: I) -> Command
 where
     I: IntoIterator<Item = S>,

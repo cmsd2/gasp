@@ -24,6 +24,18 @@ pub enum ManifestMode {
     Cloned,
 }
 
+/// Outcome of `Workspace::update_manifest`. `None` is returned for
+/// Loose-mode workspaces (nothing to update).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestUpdate {
+    /// Already at the latest commit on the tracked branch.
+    UpToDate { sha: String },
+    /// Fast-forwarded from `from` → `to`.
+    Advanced { from: String, to: String },
+    /// Skipped because the manifest repo has uncommitted changes.
+    SkippedDirty { sha: String },
+}
+
 /// A discovered or freshly initialized gasp workspace.
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -155,6 +167,32 @@ impl Workspace {
         } else {
             self.root.join(repo_path)
         }
+    }
+
+    /// Fetch + fast-forward the cloned manifest repo. Returns `None`
+    /// for Loose-mode workspaces. Skips (without erroring) when the
+    /// manifest repo has uncommitted changes — the user owns those.
+    pub fn update_manifest(&self) -> Result<Option<ManifestUpdate>> {
+        if self.manifest_mode() != ManifestMode::Cloned {
+            return Ok(None);
+        }
+        let repo = self.manifest_repo_dir();
+        let before = crate::git::local::head_sha(&repo)?;
+
+        if crate::git::local::is_dirty(&repo)? {
+            return Ok(Some(ManifestUpdate::SkippedDirty { sha: before }));
+        }
+
+        crate::git::remote::pull_ff_only(&repo)?;
+        let after = crate::git::local::head_sha(&repo)?;
+        Ok(Some(if before == after {
+            ManifestUpdate::UpToDate { sha: after }
+        } else {
+            ManifestUpdate::Advanced {
+                from: before,
+                to: after,
+            }
+        }))
     }
 }
 

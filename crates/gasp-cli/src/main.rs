@@ -8,6 +8,7 @@ use gasp_core::lock::WorkspaceLock;
 use gasp_core::manifest::Repo;
 use gasp_core::status::{HeadCompare, RepoState, TargetState};
 use gasp_core::sync::{Action, ConflictMode};
+use gasp_core::workspace::ManifestUpdate;
 use gasp_core::{Workspace, edit, freeze, status, sync};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -80,6 +81,9 @@ enum Command {
         /// Number of repos to process in parallel. Defaults to min(8, ncpu).
         #[arg(long, short = 'j', value_name = "N")]
         jobs: Option<usize>,
+        /// Skip updating the cloned manifest repo before syncing.
+        #[arg(long)]
+        no_update_manifest: bool,
     },
 
     /// Show per-repo state vs the manifest.
@@ -88,6 +92,10 @@ enum Command {
         /// Useful in CI.
         #[arg(long)]
         strict: bool,
+        /// Also report on the cloned manifest repo (HEAD, branch,
+        /// uncommitted changes). No-op in loose-file mode.
+        #[arg(long = "show-manifest")]
+        show_manifest: bool,
     },
 
     /// List repos in the manifest.
@@ -154,8 +162,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             on_conflict,
             groups,
             jobs,
-        } => cmd_sync(&groups, on_conflict.into(), jobs),
-        Command::Status { strict } => cmd_status(strict),
+            no_update_manifest,
+        } => cmd_sync(&groups, on_conflict.into(), jobs, !no_update_manifest),
+        Command::Status {
+            strict,
+            show_manifest,
+        } => cmd_status(strict, show_manifest),
         Command::Foreach { groups, command } => cmd_foreach(&groups, &command),
         Command::Freeze { output } => cmd_freeze(output.as_deref()).map(|()| ExitCode::SUCCESS),
         Command::Add {
@@ -293,9 +305,27 @@ fn cmd_list() -> Result<()> {
     Ok(())
 }
 
-fn cmd_status(strict: bool) -> Result<ExitCode> {
+fn cmd_status(strict: bool, show_manifest: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
+
+    if show_manifest && let Some(m) = status::inspect_manifest(&ws)? {
+        let branch = m.branch.as_deref().unwrap_or("(detached)");
+        let state = if m.dirty { "dirty" } else { "clean" };
+        println!(
+            "manifest: {} {} on {} ({})",
+            short_sha(&m.head),
+            state,
+            branch,
+            if m.dirty {
+                "uncommitted changes"
+            } else {
+                "no local changes"
+            },
+        );
+        println!();
+    }
+
     let manifest = ws.load_manifest()?;
     let repos = manifest.resolve()?;
 
@@ -441,10 +471,36 @@ fn short_sha(s: &str) -> String {
     s.chars().take(7).collect()
 }
 
-fn cmd_sync(group_filter: &[String], mode: ConflictMode, jobs: Option<usize>) -> Result<ExitCode> {
+fn cmd_sync(
+    group_filter: &[String],
+    mode: ConflictMode,
+    jobs: Option<usize>,
+    update_manifest: bool,
+) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
     let _lock = WorkspaceLock::acquire(&ws.dot_dir())?;
+
+    if update_manifest && let Some(outcome) = ws.update_manifest()? {
+        match outcome {
+            ManifestUpdate::UpToDate { sha } => {
+                println!("manifest: up to date ({})", short_sha(&sha));
+            }
+            ManifestUpdate::Advanced { from, to } => {
+                println!(
+                    "manifest: advanced {} → {}",
+                    short_sha(&from),
+                    short_sha(&to)
+                );
+            }
+            ManifestUpdate::SkippedDirty { sha } => {
+                println!(
+                    "manifest: skipped update ({}, uncommitted changes)",
+                    short_sha(&sha)
+                );
+            }
+        }
+    }
 
     let manifest = ws.load_manifest()?;
     let mut repos = manifest.resolve()?;
