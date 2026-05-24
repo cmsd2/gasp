@@ -81,6 +81,9 @@ pub enum Error {
         #[source]
         source: git2::Error,
     },
+
+    #[error("workspace at {path} is locked by {holder}")]
+    WorkspaceLocked { path: PathBuf, holder: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

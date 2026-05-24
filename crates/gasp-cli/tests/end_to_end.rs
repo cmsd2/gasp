@@ -697,6 +697,48 @@ revision = "main"
 }
 
 #[test]
+fn sync_refuses_when_workspace_is_locked() {
+    let f = Fixture::new();
+    let bare = f.make_bare_repo("alpha");
+    let seed = f.write_manifest(&format!(
+        r#"
+version = 1
+[[repos]]
+name = "alpha"
+url  = "{}"
+"#,
+        bare.display(),
+    ));
+    assert!(f.gasp(&["init", seed.to_str().unwrap()]).status.success());
+
+    // Manually take the OS-level lock on .workspace/lock, then attempt sync.
+    use fs2::FileExt;
+    let lock_path = f.workspace.join(".workspace").join("lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    lock_file.try_lock_exclusive().unwrap();
+    std::io::Write::write_all(&mut &lock_file, b"pid=12345 host=other-tester\n").unwrap();
+
+    let out = f.gasp(&["sync"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is locked"), "{stderr}");
+    assert!(stderr.contains("other-tester"), "{stderr}");
+
+    FileExt::unlock(&lock_file).unwrap();
+    drop(lock_file);
+
+    // After releasing the lock, sync proceeds.
+    let out = f.gasp(&["sync"]);
+    assert!(out.status.success());
+}
+
+#[test]
 fn sync_group_filter_restricts_clones() {
     let f = Fixture::new();
     let a = f.make_bare_repo("aa");

@@ -3,9 +3,13 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use gasp_core::lock::WorkspaceLock;
+use gasp_core::manifest::Repo;
 use gasp_core::status::{HeadCompare, RepoState, TargetState};
 use gasp_core::sync::{Action, ConflictMode};
 use gasp_core::{Workspace, status, sync};
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 mod table;
 use table::Table;
@@ -66,6 +70,9 @@ enum Command {
         /// Restrict to repos in the given group(s).
         #[arg(long = "group", value_name = "GROUP")]
         groups: Vec<String>,
+        /// Number of repos to process in parallel. Defaults to min(8, ncpu).
+        #[arg(long, short = 'j', value_name = "N")]
+        jobs: Option<usize>,
     },
 
     /// Show per-repo state vs the manifest.
@@ -136,7 +143,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Sync {
             on_conflict,
             groups,
-        } => cmd_sync(&groups, on_conflict.into()),
+            jobs,
+        } => cmd_sync(&groups, on_conflict.into(), jobs),
         Command::Status { strict } => cmd_status(strict),
         Command::Foreach { .. } => not_implemented("foreach"),
         Command::Freeze { .. } => not_implemented("freeze"),
@@ -371,9 +379,11 @@ fn short_sha(s: &str) -> String {
     s.chars().take(7).collect()
 }
 
-fn cmd_sync(group_filter: &[String], mode: ConflictMode) -> Result<ExitCode> {
+fn cmd_sync(group_filter: &[String], mode: ConflictMode, jobs: Option<usize>) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     let ws = Workspace::discover(&cwd)?;
+    let _lock = WorkspaceLock::acquire(&ws.dot_dir())?;
+
     let manifest = ws.load_manifest()?;
     let mut repos = manifest.resolve()?;
 
@@ -386,44 +396,44 @@ fn cmd_sync(group_filter: &[String], mode: ConflictMode) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    let num_jobs = jobs.unwrap_or_else(|| num_cpus::get().min(8)).max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_jobs)
+        .build()
+        .context("building rayon pool")?;
+
+    let pb = ProgressBar::new(repos.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("[{pos}/{len}] {wide_msg}")
+            .expect("static template")
+            .progress_chars("=> "),
+    );
+
+    let outcomes: Vec<SyncOutcome> = pool.install(|| {
+        repos
+            .par_iter()
+            .map(|repo| {
+                let outcome = sync_one(&ws, repo, mode);
+                // println! holds the stdout lock per call, so per-repo
+                // lines from different workers won't interleave inside
+                // a line. They will be in nondeterministic order across
+                // lines.
+                println!("{}", outcome.line());
+                pb.set_message(repo.name.clone());
+                pb.inc(1);
+                outcome
+            })
+            .collect()
+    });
+
+    pb.finish_and_clear();
+
     let mut counts = SyncCounts::default();
-    let mut failed: Vec<(String, gasp_core::Error)> = Vec::new();
-
-    for repo in &repos {
-        let dest = ws.repo_path(&repo.path);
-
-        // Fetch first for existing repos so planning sees up-to-date refs.
-        if dest.exists()
-            && let Err(err) = sync::fetch_remote(&dest, &repo.remote)
-        {
-            println!("  fetch  {} ... FAILED", repo.name);
-            failed.push((repo.name.clone(), err));
-            continue;
-        }
-
-        let status = match status::inspect(&ws, repo) {
-            Ok(s) => s,
-            Err(err) => {
-                println!("  status {} ... FAILED", repo.name);
-                failed.push((repo.name.clone(), err));
-                continue;
-            }
-        };
-
-        let action = sync::plan_action(&status, mode);
-        let (label, detail) = describe_action(&action);
-        print!("  {label:<6} {} {} ... ", repo.name, detail);
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-
-        match sync::execute(&ws, repo, &action) {
-            Ok(()) => {
-                println!("ok");
-                counts.bump(&action);
-            }
-            Err(err) => {
-                println!("FAILED");
-                failed.push((repo.name.clone(), err));
-            }
+    let mut failed: Vec<&SyncOutcome> = Vec::new();
+    for o in &outcomes {
+        match &o.result {
+            SyncResult::Done(action) => counts.bump(action),
+            SyncResult::Failed(_) => failed.push(o),
         }
     }
 
@@ -441,12 +451,77 @@ fn cmd_sync(group_filter: &[String], mode: ConflictMode) -> Result<ExitCode> {
 
     if !failed.is_empty() {
         println!("\nFailures:");
-        for (name, err) in &failed {
-            println!("  {name}: {err}");
+        for o in &failed {
+            if let SyncResult::Failed(err) = &o.result {
+                println!("  {}: {err}", o.name);
+            }
         }
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+struct SyncOutcome {
+    name: String,
+    result: SyncResult,
+}
+
+enum SyncResult {
+    Done(Action),
+    Failed(gasp_core::Error),
+}
+
+impl SyncOutcome {
+    fn line(&self) -> String {
+        match &self.result {
+            SyncResult::Done(action) => {
+                let (label, detail) = describe_action(action);
+                format!("  {label:<6} {} {detail} ... ok", self.name)
+            }
+            SyncResult::Failed(_) => {
+                format!("  error  {} ... FAILED", self.name)
+            }
+        }
+    }
+}
+
+/// Sync a single repo: fetch (if exists) → inspect → plan → execute.
+/// All errors are folded into `SyncResult::Failed` so the parallel
+/// driver can collect outcomes without propagating Results.
+fn sync_one(ws: &Workspace, repo: &Repo, mode: ConflictMode) -> SyncOutcome {
+    let dest = ws.repo_path(&repo.path);
+
+    if dest.exists()
+        && let Err(err) = sync::fetch_remote(&dest, &repo.remote)
+    {
+        return SyncOutcome {
+            name: repo.name.clone(),
+            result: SyncResult::Failed(err),
+        };
+    }
+
+    let status = match status::inspect(ws, repo) {
+        Ok(s) => s,
+        Err(err) => {
+            return SyncOutcome {
+                name: repo.name.clone(),
+                result: SyncResult::Failed(err),
+            };
+        }
+    };
+
+    let action = sync::plan_action(&status, mode);
+
+    match sync::execute(ws, repo, &action) {
+        Ok(()) => SyncOutcome {
+            name: repo.name.clone(),
+            result: SyncResult::Done(action),
+        },
+        Err(err) => SyncOutcome {
+            name: repo.name.clone(),
+            result: SyncResult::Failed(err),
+        },
+    }
 }
 
 #[derive(Default)]
