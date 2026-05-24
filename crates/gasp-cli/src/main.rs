@@ -1,3 +1,110 @@
-fn main() {
-    println!("Hello, world!");
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "gasp", version, about = "Multi-repo workspace manager")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Initialize a workspace from a manifest file.
+    Init {
+        /// Path to the workspace.toml manifest to use.
+        manifest: PathBuf,
+    },
+
+    /// Clone missing repos and update existing ones to match the manifest.
+    Sync {
+        /// Refuse to modify repos that aren't fast-forwardable (default).
+        #[arg(long, conflicts_with_all = ["rebase", "reset"])]
+        refuse: bool,
+        /// Rebase local commits onto the target revision on conflict.
+        #[arg(long, conflicts_with_all = ["refuse", "reset"])]
+        rebase: bool,
+        /// Hard-reset to the target revision on conflict. Destructive.
+        #[arg(long, conflicts_with_all = ["refuse", "rebase"])]
+        reset: bool,
+        /// Restrict to repos in the given group(s).
+        #[arg(long = "group", value_name = "GROUP")]
+        groups: Vec<String>,
+    },
+
+    /// Show per-repo state vs the manifest.
+    Status,
+
+    /// List repos in the manifest.
+    List,
+
+    /// Run a shell command in every repo.
+    Foreach {
+        /// Command and arguments to run.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Write a new manifest pinning the current resolved shas.
+    Freeze {
+        /// Output path. Defaults to workspace.frozen.toml in the workspace root.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
+    /// Add a repo to the manifest.
+    Add {
+        /// Logical name for the repo.
+        name: String,
+        /// URL (owner/repo shorthand or full git URL).
+        url: String,
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long = "group", value_name = "GROUP")]
+        groups: Vec<String>,
+    },
+
+    /// Remove a repo from the manifest.
+    Remove {
+        /// Logical name of the repo to remove.
+        name: String,
+    },
+
+    /// Check that the local environment can reach the manifest's hosts.
+    Doctor,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
+    match cli.command {
+        Command::Init { .. } => not_implemented("init"),
+        Command::Sync { .. } => not_implemented("sync"),
+        Command::Status => not_implemented("status"),
+        Command::List => not_implemented("list"),
+        Command::Foreach { .. } => not_implemented("foreach"),
+        Command::Freeze { .. } => not_implemented("freeze"),
+        Command::Add { .. } => not_implemented("add"),
+        Command::Remove { .. } => not_implemented("remove"),
+        Command::Doctor => not_implemented("doctor"),
+    }
+}
+
+fn not_implemented(cmd: &str) -> Result<()> {
+    println!("{cmd}: not implemented");
+    Ok(())
 }
